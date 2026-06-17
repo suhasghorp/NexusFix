@@ -38,26 +38,11 @@ public:
                 if (result.has_value() && *result > 0) {
                     received = true;
                     buffered_ += *result;
-
-                    auto data = std::span<const char>{buffer_.data(), buffered_};
-                    size_t consumed = parser_.feed(data);
-
-                    while (parser_.has_message()) {
-                        auto [start, end] = parser_.next_message();
-                        auto msg_span = data.subspan(start, end - start);
-                        session_.on_data_received(msg_span);
-                    }
-
-                    if (consumed > 0) {
-                        size_t remaining = buffered_ - consumed;
-                        if (remaining > 0) {
-                            std::memmove(buffer_.data(), buffer_.data() + consumed, remaining);
-                        }
-                        buffered_ = remaining;
-                    }
                 }
             }
         }
+
+        drain_buffered();
 
         auto now = std::chrono::steady_clock::now();
         if (now - last_tick_ >= tick_interval_) {
@@ -76,6 +61,27 @@ public:
     }
 
 private:
+    void drain_buffered() noexcept {
+        while (buffered_ > 0) {
+            auto data = std::span<const char>{buffer_.data(), buffered_};
+            size_t consumed = parser_.feed(data);
+
+            while (parser_.has_message()) {
+                auto [start, end] = parser_.next_message();
+                auto msg_span = data.subspan(start, end - start);
+                session_.on_data_received(msg_span);
+            }
+
+            if (consumed == 0) break;
+
+            size_t remaining = buffered_ - consumed;
+            if (remaining > 0) {
+                std::memmove(buffer_.data(), buffer_.data() + consumed, remaining);
+            }
+            buffered_ = remaining;
+        }
+    }
+
     TcpSocket& socket_;
     SessionManager& session_;
     StreamParser parser_;
