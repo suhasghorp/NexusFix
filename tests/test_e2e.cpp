@@ -6,6 +6,9 @@
 #include <string>
 #include <cstring>
 
+#include "nexusfix/engine/socket_bridge.hpp"
+#include "nexusfix/engine/fix_initiator.hpp"
+#include "nexusfix/engine/fix_acceptor.hpp"
 #include "nexusfix/session/session_manager.hpp"
 #include "nexusfix/transport/tcp_transport.hpp"
 #include "nexusfix/messages/fix44/execution_report.hpp"
@@ -15,70 +18,7 @@
 
 using namespace nfx;
 
-// ============================================================================
-// Helper: SocketBridge
-// Bridges TCP byte stream to SessionManager::on_data_received()
-// Uses StreamParser for FIX message framing
-// ============================================================================
-
 namespace {
-
-class SocketBridge {
-public:
-    explicit SocketBridge(TcpSocket& sock, SessionManager& session) noexcept
-        : socket_{sock}, session_{session} {}
-
-    /// Poll socket once, feed complete messages to session
-    /// Returns true if data was received
-    bool poll_once(int timeout_ms = 10) noexcept {
-        if (!socket_.is_connected()) return false;
-        if (!socket_.poll_read(timeout_ms)) return false;
-
-        // Read into buffer after any unconsumed data
-        auto space = std::span<char>{
-            buffer_.data() + buffered_,
-            buffer_.size() - buffered_
-        };
-        if (space.empty()) return false;
-
-        auto result = socket_.receive(space);
-        if (!result.has_value()) return false;
-
-        size_t received = *result;
-        if (received == 0) return false;
-
-        buffered_ += received;
-
-        // Feed to StreamParser for message framing
-        auto data = std::span<const char>{buffer_.data(), buffered_};
-        size_t consumed = parser_.feed(data);
-
-        // Dispatch complete messages to session
-        while (parser_.has_message()) {
-            auto [start, end] = parser_.next_message();
-            auto msg_span = data.subspan(start, end - start);
-            session_.on_data_received(msg_span);
-        }
-
-        // Compact buffer: move unconsumed data to front
-        if (consumed > 0) {
-            size_t remaining = buffered_ - consumed;
-            if (remaining > 0) {
-                std::memmove(buffer_.data(), buffer_.data() + consumed, remaining);
-            }
-            buffered_ = remaining;
-        }
-
-        return true;
-    }
-
-private:
-    TcpSocket& socket_;
-    SessionManager& session_;
-    StreamParser parser_;
-    std::array<char, 8192> buffer_{};
-    size_t buffered_{0};
-};
 
 // ============================================================================
 // Helper: AcceptorEndpoint
@@ -206,7 +146,7 @@ private:
         // Acceptor: on_connect -> wait for incoming Logon
         session.on_connect();
 
-        SocketBridge bridge{client_sock, session};
+        SocketBridge<> bridge{client_sock, session};
 
         // Poll loop
         while (running_.load(std::memory_order_acquire) && client_sock.is_connected()) {
@@ -272,7 +212,7 @@ public:
         auto result = socket_.connect("127.0.0.1", port);
         if (!result.has_value()) return false;
         session_->on_connect();
-        bridge_ = std::make_unique<SocketBridge>(socket_, *session_);
+        bridge_ = std::make_unique<SocketBridge<>>(socket_, *session_);
         return true;
     }
 
@@ -306,7 +246,7 @@ private:
     SessionConfig config_;
     TcpSocket socket_;
     std::unique_ptr<SessionManager> session_;
-    std::unique_ptr<SocketBridge> bridge_;
+    std::unique_ptr<SocketBridge<>> bridge_;
     std::vector<std::pair<SessionState, SessionState>> state_changes_;
     std::vector<char> app_msg_types_;
     std::atomic<size_t> app_message_count_{0};
@@ -620,7 +560,7 @@ TEST_CASE("E2E: OrderCancelRequest -> cancel ack round-trip", "[e2e][regression]
             session.set_callbacks(std::move(cbs));
             session.on_connect();
 
-            SocketBridge bridge{client_sock, session};
+            SocketBridge<> bridge{client_sock, session};
             while (running.load(std::memory_order_acquire) && client_sock.is_connected()) {
                 bridge.poll_once(20);
             }
@@ -926,4 +866,442 @@ TEST_CASE("E2E: Concurrent logon from same comp ID (reject second)", "[e2e][regr
     CHECK(initiator1.session().state() == SessionState::Active);
 
     acceptor.stop();
+}
+
+// ============================================================================
+// Engine API Tests (FixInitiator / FixAcceptor)
+// ============================================================================
+
+TEST_CASE("E2E: Heartbeat fires via SocketBridge timer", "[e2e][heartbeat]") {
+    // Peer uses a long heartbeat (60s) so it won't send test requests,
+    // but responds to logon with HeartBtInt=1 to keep the initiator's interval short.
+    TcpAcceptor raw_acceptor;
+    REQUIRE(raw_acceptor.listen(0).has_value());
+    uint16_t port = raw_acceptor.local_port();
+
+    std::atomic<bool> peer_running{true};
+    std::thread peer_thread([&] {
+        auto client_result = raw_acceptor.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+
+        // Peer: manually respond to logon, then just echo heartbeats.
+        // Using heart_bt_int=1 in the response but 60s in the peer's timer
+        // so the peer won't proactively send test requests.
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "INITIATOR";
+        sc.heart_bt_int = 1;
+        sc.validate_comp_ids = false;
+        SessionManager peer_session{sc};
+
+        SessionCallbacks pcbs;
+        pcbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        peer_session.set_callbacks(std::move(pcbs));
+        peer_session.on_connect();
+
+        // Peer uses NO timer tick (just raw poll_once without bridge timer)
+        // to avoid sending test requests that would trigger heartbeat responses
+        StreamParser parser;
+        std::array<char, 8192> buffer{};
+        size_t buffered = 0;
+
+        while (peer_running.load(std::memory_order_acquire) && client.is_connected()) {
+            if (!client.poll_read(20)) continue;
+            auto space = std::span<char>{buffer.data() + buffered, buffer.size() - buffered};
+            if (space.empty()) continue;
+            auto result = client.receive(space);
+            if (!result.has_value() || *result == 0) continue;
+            buffered += *result;
+            auto data = std::span<const char>{buffer.data(), buffered};
+            size_t consumed = parser.feed(data);
+            while (parser.has_message()) {
+                auto [start, end] = parser.next_message();
+                peer_session.on_data_received(data.subspan(start, end - start));
+            }
+            if (consumed > 0) {
+                size_t remaining = buffered - consumed;
+                if (remaining > 0) std::memmove(buffer.data(), buffer.data() + consumed, remaining);
+                buffered = remaining;
+            }
+        }
+    });
+
+    SessionConfig config;
+    config.sender_comp_id = "INITIATOR";
+    config.target_comp_id = "ACCEPTOR";
+    config.heart_bt_int = 1;
+    config.validate_comp_ids = false;
+
+    SessionManager session{config};
+    TcpSocket sock;
+    REQUIRE(sock.connect("127.0.0.1", port).has_value());
+
+    SessionCallbacks cbs;
+    cbs.on_send = [&sock](std::span<const char> data) -> bool {
+        auto result = sock.send(data);
+        return result.has_value() && *result > 0;
+    };
+    session.set_callbacks(std::move(cbs));
+    session.on_connect();
+    (void)session.initiate_logon();
+
+    SocketBridge<> bridge{sock, session};
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (session.state() != SessionState::Active &&
+           std::chrono::steady_clock::now() < deadline) {
+        bridge.poll_once(10);
+    }
+    REQUIRE(session.state() == SessionState::Active);
+
+    uint64_t sent_before = session.stats().messages_sent;
+
+    // Idle for 1.5s. SocketBridge timer tick should drive on_timer_tick,
+    // which detects 1s since last_sent_ and calls send_heartbeat().
+    auto idle_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - idle_start < std::chrono::milliseconds(1500)) {
+        bridge.poll_once(10);
+    }
+
+    // Verify that additional messages were sent (heartbeats or test requests)
+    // driven by the SocketBridge's on_timer_tick() integration.
+    CHECK(session.stats().messages_sent > sent_before);
+
+    peer_running.store(false, std::memory_order_release);
+    raw_acceptor.close();
+    peer_thread.join();
+}
+
+TEST_CASE("E2E: Burst send 100 NOS messages", "[e2e][burst]") {
+    AcceptorEndpoint acceptor;
+    uint16_t port = acceptor.start();
+
+    InitiatorEndpoint initiator;
+    REQUIRE(initiator.connect(port));
+
+    // Logon
+    (void)initiator.session().initiate_logon();
+    REQUIRE(initiator.poll_until([&] { return initiator.logon_received(); }));
+    REQUIRE(acceptor.wait_for_logon());
+
+    static constexpr int BURST_SIZE = 100;
+
+    // Send 100 NOS messages
+    for (int i = 0; i < BURST_SIZE; ++i) {
+        char cl_ord_id[32];
+        std::snprintf(cl_ord_id, sizeof(cl_ord_id), "BURST%03d", i);
+
+        auto nos_builder = fix44::NewOrderSingle::Builder{}
+            .cl_ord_id(cl_ord_id)
+            .symbol("AAPL")
+            .side(Side::Buy)
+            .transact_time("20260601-12:00:00.000")
+            .order_qty(Qty::from_int(100))
+            .ord_type(OrdType::Limit)
+            .price(FixedPrice::from_double(150.25));
+        auto result = initiator.session().send_app_message(nos_builder);
+        REQUIRE(result.has_value());
+    }
+
+    // Poll until all ERs received (acceptor responds with ER for each NOS)
+    bool all_received = initiator.poll_until([&] {
+        return initiator.app_message_count() >= BURST_SIZE;
+    }, 5000);
+
+    REQUIRE(all_received);
+    CHECK(initiator.app_message_count() == BURST_SIZE);
+
+    // All should be ExecutionReports
+    for (size_t i = 0; i < initiator.app_msg_types().size(); ++i) {
+        CHECK(initiator.app_msg_types()[i] == msg_type::ExecutionReport);
+    }
+
+    acceptor.stop();
+}
+
+TEST_CASE("E2E: FixInitiator lifecycle", "[e2e][initiator]") {
+    // Start an acceptor (using existing helper)
+    AcceptorEndpoint acceptor;
+    uint16_t port = acceptor.start();
+
+    // Create FixInitiator
+    InitiatorConfig iconfig;
+    iconfig.host = "127.0.0.1";
+    iconfig.port = port;
+    iconfig.sender_comp_id = "FIX_INIT";
+    iconfig.target_comp_id = "ACCEPTOR";
+    iconfig.heart_bt_int = 30;
+    iconfig.validate_comp_ids = false;
+    iconfig.auto_reconnect = false;
+
+    FixInitiator initiator{iconfig};
+
+    std::atomic<bool> logon_ok{false};
+    std::atomic<size_t> er_count{0};
+
+    SessionCallbacks cbs;
+    cbs.on_logon = [&logon_ok]() {
+        logon_ok.store(true, std::memory_order_release);
+    };
+    cbs.on_app_message = [&er_count]([[maybe_unused]] const ParsedMessage& msg) {
+        er_count.fetch_add(1, std::memory_order_release);
+    };
+    initiator.set_callbacks(std::move(cbs));
+
+    // Start (connect + logon)
+    auto start_result = initiator.start();
+    REQUIRE(start_result.has_value());
+
+    // Poll until logon
+    bool active = initiator.poll_until([&] {
+        return logon_ok.load(std::memory_order_acquire);
+    });
+    REQUIRE(active);
+    REQUIRE(initiator.is_active());
+    REQUIRE(acceptor.wait_for_logon());
+
+    // Send NOS via engine API
+    auto nos_builder = fix44::NewOrderSingle::Builder{}
+        .cl_ord_id("ENGINE001")
+        .symbol("TSLA")
+        .side(Side::Buy)
+        .transact_time("20260601-12:00:00.000")
+        .order_qty(Qty::from_int(50))
+        .ord_type(OrdType::Limit)
+        .price(FixedPrice::from_double(200.00));
+    auto send_result = initiator.send(nos_builder);
+    REQUIRE(send_result.has_value());
+
+    // Wait for ER
+    REQUIRE(acceptor.wait_for_app_message());
+    bool er_received = initiator.poll_until([&] {
+        return er_count.load(std::memory_order_acquire) > 0;
+    });
+    REQUIRE(er_received);
+
+    // Stop (logout)
+    auto stop_result = initiator.stop();
+    REQUIRE(stop_result.has_value());
+
+    acceptor.stop();
+}
+
+TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
+    AcceptorConfig aconfig;
+    aconfig.port = 0;
+    aconfig.sender_comp_id = "FIX_ACPT";
+    aconfig.target_comp_id = "FIX_INIT";
+    aconfig.heart_bt_int = 30;
+    aconfig.validate_comp_ids = false;
+
+    FixAcceptor acceptor{aconfig};
+
+    std::atomic<bool> app_msg_received{false};
+
+    SessionCallbacks acbs;
+    acbs.on_app_message = [&app_msg_received, &acceptor]([[maybe_unused]] const ParsedMessage& msg) {
+        app_msg_received.store(true, std::memory_order_release);
+    };
+    acceptor.set_callbacks(std::move(acbs));
+
+    // Listen
+    auto listen_result = acceptor.listen();
+    REQUIRE(listen_result.has_value());
+    uint16_t port = *listen_result;
+    REQUIRE(port != 0);
+
+    // Start background
+    acceptor.start_background();
+
+    // Connect with FixInitiator
+    InitiatorConfig iconfig;
+    iconfig.host = "127.0.0.1";
+    iconfig.port = port;
+    iconfig.sender_comp_id = "FIX_INIT";
+    iconfig.target_comp_id = "FIX_ACPT";
+    iconfig.heart_bt_int = 30;
+    iconfig.validate_comp_ids = false;
+    iconfig.auto_reconnect = false;
+
+    FixInitiator initiator{iconfig};
+
+    std::atomic<bool> logon_ok{false};
+    SessionCallbacks icbs;
+    icbs.on_logon = [&logon_ok]() {
+        logon_ok.store(true, std::memory_order_release);
+    };
+    initiator.set_callbacks(std::move(icbs));
+
+    auto start_result = initiator.start();
+    REQUIRE(start_result.has_value());
+
+    bool active = initiator.poll_until([&] {
+        return logon_ok.load(std::memory_order_acquire);
+    });
+    REQUIRE(active);
+    REQUIRE(initiator.is_active());
+
+    // Send NOS
+    auto nos_builder = fix44::NewOrderSingle::Builder{}
+        .cl_ord_id("ACPT001")
+        .symbol("GOOG")
+        .side(Side::Buy)
+        .transact_time("20260601-12:00:00.000")
+        .order_qty(Qty::from_int(25))
+        .ord_type(OrdType::Limit)
+        .price(FixedPrice::from_double(175.00));
+    (void)initiator.send(nos_builder);
+
+    // Wait for acceptor to receive app message
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!app_msg_received.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        initiator.poll(10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(app_msg_received.load());
+
+    // Cleanup
+    initiator.stop();
+    acceptor.stop();
+}
+
+TEST_CASE("E2E: FixInitiator reconnects after acceptor restart", "[e2e][reconnect]") {
+    // Use a dedicated acceptor that listens on a specific port
+    TcpAcceptor raw_acceptor;
+    auto listen_result = raw_acceptor.listen(0);
+    REQUIRE(listen_result.has_value());
+    uint16_t port = raw_acceptor.local_port();
+    REQUIRE(port != 0);
+
+    // Accept in background thread
+    std::atomic<bool> acceptor_running{true};
+    std::atomic<bool> first_logon{false};
+    std::thread acceptor_thread([&] {
+        auto client_result = raw_acceptor.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "RECONN";
+        sc.heart_bt_int = 30;
+        sc.validate_comp_ids = false;
+        SessionManager session{sc};
+
+        SessionCallbacks cbs;
+        cbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        cbs.on_logon = [&first_logon]() {
+            first_logon.store(true, std::memory_order_release);
+        };
+        session.set_callbacks(std::move(cbs));
+        session.on_connect();
+
+        SocketBridge<> bridge{client, session};
+        while (acceptor_running.load(std::memory_order_acquire) && client.is_connected()) {
+            bridge.poll_once(20);
+        }
+    });
+
+    // Create FixInitiator with auto-reconnect
+    InitiatorConfig iconfig;
+    iconfig.host = "127.0.0.1";
+    iconfig.port = port;
+    iconfig.sender_comp_id = "RECONN";
+    iconfig.target_comp_id = "ACCEPTOR";
+    iconfig.heart_bt_int = 30;
+    iconfig.validate_comp_ids = false;
+    iconfig.auto_reconnect = true;
+    iconfig.reconnect_delay_ms = 200;
+    iconfig.max_reconnect_attempts = 10;
+
+    FixInitiator initiator{iconfig};
+
+    std::atomic<int> logon_count{0};
+    SessionCallbacks cbs;
+    cbs.on_logon = [&logon_count]() {
+        logon_count.fetch_add(1, std::memory_order_release);
+    };
+    initiator.set_callbacks(std::move(cbs));
+
+    // First connect + logon
+    auto start_result = initiator.start();
+    REQUIRE(start_result.has_value());
+
+    bool active = initiator.poll_until([&] {
+        return logon_count.load(std::memory_order_acquire) >= 1;
+    });
+    REQUIRE(active);
+    REQUIRE(initiator.is_active());
+
+    // Kill first acceptor
+    acceptor_running.store(false, std::memory_order_release);
+    raw_acceptor.close();
+    acceptor_thread.join();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Poll to detect disconnect
+    initiator.poll(50);
+    initiator.poll(50);
+
+    CHECK(initiator.state() == SessionState::Reconnecting);
+
+    // Start new acceptor on the same port
+    TcpAcceptor raw_acceptor2;
+    auto listen2 = raw_acceptor2.listen(port);
+    if (!listen2.has_value()) {
+        // TIME_WAIT, skip reconnect verification
+        WARN("Could not rebind port " << port << ", skipping reconnect verification");
+        return;
+    }
+
+    std::atomic<bool> acceptor2_running{true};
+    std::thread acceptor2_thread([&] {
+        auto client_result = raw_acceptor2.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "RECONN";
+        sc.heart_bt_int = 30;
+        sc.validate_comp_ids = false;
+        SessionManager session{sc};
+
+        SessionCallbacks scbs;
+        scbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        session.set_callbacks(std::move(scbs));
+        session.on_connect();
+
+        SocketBridge<> bridge{client, session};
+        while (acceptor2_running.load(std::memory_order_acquire) && client.is_connected()) {
+            bridge.poll_once(20);
+        }
+    });
+
+    // Poll initiator to drive reconnection
+    bool reconnected = initiator.poll_until([&] {
+        return logon_count.load(std::memory_order_acquire) >= 2;
+    }, 5000);
+
+    CHECK(reconnected);
+    if (reconnected) {
+        CHECK(initiator.is_active());
+    }
+
+    acceptor2_running.store(false, std::memory_order_release);
+    raw_acceptor2.close();
+    acceptor2_thread.join();
 }

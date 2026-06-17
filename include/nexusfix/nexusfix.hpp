@@ -40,6 +40,11 @@
 #include "nexusfix/transport/tcp_transport.hpp"
 #include "nexusfix/transport/io_uring_transport.hpp"
 
+// Engine
+#include "nexusfix/engine/socket_bridge.hpp"
+#include "nexusfix/engine/fix_initiator.hpp"
+#include "nexusfix/engine/fix_acceptor.hpp"
+
 namespace nfx {
 
 /// Library version

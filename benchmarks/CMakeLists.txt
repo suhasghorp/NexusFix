@@ -305,3 +305,12 @@ set_target_properties(field_loop_only_bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/benchmarks
 )
 
+# End-to-end pipeline benchmark (TICKET_481: NOS->ER round-trip over TCP loopback)
+add_executable(pipeline_bench pipeline_bench.cpp)
+target_link_libraries(pipeline_bench PRIVATE nexusfix pthread)
+target_include_directories(pipeline_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(pipeline_bench PRIVATE -O3 -march=native)
+set_target_properties(pipeline_bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/benchmarks
+)
+
