@@ -1104,7 +1104,7 @@ TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
     std::atomic<bool> app_msg_received{false};
 
     SessionCallbacks acbs;
-    acbs.on_app_message = [&app_msg_received, &acceptor]([[maybe_unused]] const ParsedMessage& msg) {
+    acbs.on_app_message = [&app_msg_received]([[maybe_unused]] const ParsedMessage& msg) {
         app_msg_received.store(true, std::memory_order_release);
     };
     acceptor.set_callbacks(std::move(acbs));

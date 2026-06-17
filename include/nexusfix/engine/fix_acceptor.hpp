@@ -108,7 +108,7 @@ private:
             logout_complete.store(true, std::memory_order_release);
             if (user_callbacks_.on_logout) user_callbacks_.on_logout(text);
         };
-        cbs.on_app_message = [this, &session](const ParsedMessage& msg) {
+        cbs.on_app_message = [this](const ParsedMessage& msg) {
             if (user_callbacks_.on_app_message) {
                 user_callbacks_.on_app_message(msg);
             }
