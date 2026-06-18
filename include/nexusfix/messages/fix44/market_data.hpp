@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -255,6 +256,84 @@ struct MarketDataSnapshotFullRefresh {
 
         return msg;
     }
+
+    // ========================================================================
+    // Building
+    // ========================================================================
+
+    struct MDEntry {
+        MDEntryType entry_type{MDEntryType::Bid};
+        FixedPrice entry_px;
+        Qty entry_size;
+    };
+
+    class Builder {
+    public:
+        Builder& sender_comp_id(std::string_view v) noexcept { sender_comp_id_ = v; return *this; }
+        Builder& target_comp_id(std::string_view v) noexcept { target_comp_id_ = v; return *this; }
+        Builder& msg_seq_num(uint32_t v) noexcept { msg_seq_num_ = v; return *this; }
+        Builder& sending_time(std::string_view v) noexcept { sending_time_ = v; return *this; }
+        Builder& md_req_id(std::string_view v) noexcept { md_req_id_ = v; return *this; }
+        Builder& symbol(std::string_view v) noexcept { symbol_ = v; return *this; }
+        Builder& security_id(std::string_view v) noexcept { security_id_ = v; return *this; }
+        Builder& security_exchange(std::string_view v) noexcept { security_exchange_ = v; return *this; }
+
+        Builder& add_entry(MDEntryType type, FixedPrice px, Qty size) noexcept {
+            if (entry_count_ < MAX_ENTRIES) {
+                entries_[entry_count_++] = MDEntry{type, px, size};
+            }
+            return *this;
+        }
+
+        [[nodiscard]] std::span<const char> build(MessageAssembler& asm_) const noexcept {
+            asm_.start()
+                .field(tag::MsgType::value, MSG_TYPE)
+                .field(tag::SenderCompID::value, sender_comp_id_)
+                .field(tag::TargetCompID::value, target_comp_id_)
+                .field(tag::MsgSeqNum::value, static_cast<int64_t>(msg_seq_num_))
+                .field(tag::SendingTime::value, sending_time_);
+
+            if (!md_req_id_.empty()) {
+                asm_.field(tag::MDReqID::value, md_req_id_);
+            }
+
+            asm_.field(tag::Symbol::value, symbol_);
+
+            if (!security_id_.empty()) {
+                asm_.field(tag::SecurityID::value, security_id_);
+            }
+
+            if (!security_exchange_.empty()) {
+                asm_.field(tag::SecurityExchange::value, security_exchange_);
+            }
+
+            if (entry_count_ > 0) {
+                asm_.field(tag::NoMDEntries::value, static_cast<int64_t>(entry_count_));
+                for (size_t i = 0; i < entry_count_; ++i) {
+                    asm_.field(tag::MDEntryType::value, static_cast<char>(entries_[i].entry_type));
+                    asm_.field(tag::MDEntryPx::value, entries_[i].entry_px);
+                    asm_.field(tag::MDEntrySize::value, static_cast<int64_t>(entries_[i].entry_size.whole()));
+                }
+            }
+
+            return asm_.finish();
+        }
+
+    private:
+        static constexpr size_t MAX_ENTRIES = 64;
+
+        std::string_view sender_comp_id_;
+        std::string_view target_comp_id_;
+        uint32_t msg_seq_num_{1};
+        std::string_view sending_time_;
+        std::string_view md_req_id_;
+        std::string_view symbol_;
+        std::string_view security_id_;
+        std::string_view security_exchange_;
+
+        std::array<MDEntry, MAX_ENTRIES> entries_;
+        size_t entry_count_{0};
+    };
 };
 
 // ============================================================================
@@ -338,6 +417,75 @@ struct MarketDataIncrementalRefresh {
 
         return msg;
     }
+
+    // ========================================================================
+    // Building
+    // ========================================================================
+
+    struct MDIncrEntry {
+        MDUpdateAction update_action{MDUpdateAction::New};
+        MDEntryType entry_type{MDEntryType::Bid};
+        std::string_view symbol;
+        FixedPrice entry_px;
+        Qty entry_size;
+    };
+
+    class Builder {
+    public:
+        Builder& sender_comp_id(std::string_view v) noexcept { sender_comp_id_ = v; return *this; }
+        Builder& target_comp_id(std::string_view v) noexcept { target_comp_id_ = v; return *this; }
+        Builder& msg_seq_num(uint32_t v) noexcept { msg_seq_num_ = v; return *this; }
+        Builder& sending_time(std::string_view v) noexcept { sending_time_ = v; return *this; }
+        Builder& md_req_id(std::string_view v) noexcept { md_req_id_ = v; return *this; }
+
+        Builder& add_entry(MDUpdateAction action, MDEntryType type,
+                           std::string_view symbol, FixedPrice px, Qty size) noexcept {
+            if (entry_count_ < MAX_ENTRIES) {
+                entries_[entry_count_++] = MDIncrEntry{action, type, symbol, px, size};
+            }
+            return *this;
+        }
+
+        [[nodiscard]] std::span<const char> build(MessageAssembler& asm_) const noexcept {
+            asm_.start()
+                .field(tag::MsgType::value, MSG_TYPE)
+                .field(tag::SenderCompID::value, sender_comp_id_)
+                .field(tag::TargetCompID::value, target_comp_id_)
+                .field(tag::MsgSeqNum::value, static_cast<int64_t>(msg_seq_num_))
+                .field(tag::SendingTime::value, sending_time_);
+
+            if (!md_req_id_.empty()) {
+                asm_.field(tag::MDReqID::value, md_req_id_);
+            }
+
+            if (entry_count_ > 0) {
+                asm_.field(tag::NoMDEntries::value, static_cast<int64_t>(entry_count_));
+                for (size_t i = 0; i < entry_count_; ++i) {
+                    asm_.field(tag::MDUpdateAction::value, static_cast<char>(entries_[i].update_action));
+                    asm_.field(tag::MDEntryType::value, static_cast<char>(entries_[i].entry_type));
+                    if (!entries_[i].symbol.empty()) {
+                        asm_.field(tag::Symbol::value, entries_[i].symbol);
+                    }
+                    asm_.field(tag::MDEntryPx::value, entries_[i].entry_px);
+                    asm_.field(tag::MDEntrySize::value, static_cast<int64_t>(entries_[i].entry_size.whole()));
+                }
+            }
+
+            return asm_.finish();
+        }
+
+    private:
+        static constexpr size_t MAX_ENTRIES = 64;
+
+        std::string_view sender_comp_id_;
+        std::string_view target_comp_id_;
+        uint32_t msg_seq_num_{1};
+        std::string_view sending_time_;
+        std::string_view md_req_id_;
+
+        std::array<MDIncrEntry, MAX_ENTRIES> entries_;
+        size_t entry_count_{0};
+    };
 };
 
 // ============================================================================
