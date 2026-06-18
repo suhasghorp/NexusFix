@@ -140,6 +140,10 @@ TEST_CASE("RDTSC clock calibration", "[rdtsc][calibration]") {
         // ARM64 CNTVCT_EL0: typically 24-54 MHz = 0.024-0.054 ticks/ns
         CHECK(freq > 0.001);
         CHECK(freq < 1.0);
+#elif defined(_MSC_VER)
+        // Windows VMs may virtualize TSC at very low frequencies
+        CHECK(freq > 0.0);
+        CHECK(freq < 10.0);
 #else
         // x86 TSC: modern CPUs 1-5 GHz range
         CHECK(freq > 0.5);
