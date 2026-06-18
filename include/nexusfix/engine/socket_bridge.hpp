@@ -29,15 +29,15 @@ public:
 
         if (socket_.is_connected() && socket_.poll_read(timeout_ms)) {
             auto space = std::span<char>{
-                buffer_.data() + buffered_,
-                buffer_.size() - buffered_
+                buffer_.data() + write_pos_,
+                buffer_.size() - write_pos_
             };
 
             if (!space.empty()) {
                 auto result = socket_.receive(space);
                 if (result.has_value() && *result > 0) {
                     received = true;
-                    buffered_ += *result;
+                    write_pos_ += *result;
                 }
             }
         }
@@ -56,14 +56,16 @@ public:
     /// Reset parser and buffer state (e.g., after reconnect)
     void reset() noexcept {
         parser_.reset();
-        buffered_ = 0;
+        read_pos_ = 0;
+        write_pos_ = 0;
         last_tick_ = std::chrono::steady_clock::now();
     }
 
 private:
     void drain_buffered() noexcept {
-        while (buffered_ > 0) {
-            auto data = std::span<const char>{buffer_.data(), buffered_};
+        while (read_pos_ < write_pos_) {
+            size_t avail = write_pos_ - read_pos_;
+            auto data = std::span<const char>{buffer_.data() + read_pos_, avail};
             size_t consumed = parser_.feed(data);
 
             while (parser_.has_message()) {
@@ -73,12 +75,17 @@ private:
             }
 
             if (consumed == 0) break;
+            read_pos_ += consumed;
+        }
 
-            size_t remaining = buffered_ - consumed;
-            if (remaining > 0) {
-                std::memmove(buffer_.data(), buffer_.data() + consumed, remaining);
-            }
-            buffered_ = remaining;
+        if (read_pos_ == write_pos_) {
+            read_pos_ = 0;
+            write_pos_ = 0;
+        } else if (read_pos_ > BufferSize / 2) {
+            size_t remaining = write_pos_ - read_pos_;
+            std::memmove(buffer_.data(), buffer_.data() + read_pos_, remaining);
+            read_pos_ = 0;
+            write_pos_ = remaining;
         }
     }
 
@@ -86,7 +93,8 @@ private:
     SessionManager& session_;
     StreamParser parser_;
     std::array<char, BufferSize> buffer_{};
-    size_t buffered_{0};
+    size_t read_pos_{0};
+    size_t write_pos_{0};
     std::chrono::steady_clock::time_point last_tick_;
     static constexpr std::chrono::milliseconds tick_interval_{100};
 };

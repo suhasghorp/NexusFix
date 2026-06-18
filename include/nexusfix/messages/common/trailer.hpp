@@ -3,8 +3,6 @@
 #include <span>
 #include <array>
 #include <cstdint>
-#include <cstdio>
-
 #include "nexusfix/types/tag.hpp"
 #include "nexusfix/types/error.hpp"
 #include "nexusfix/interfaces/i_message.hpp"
@@ -216,12 +214,72 @@ public:
         return field(tag_num, std::string_view{&value, 1});
     }
 
-    /// Append price field
+    /// Append price field (integer-only formatting, no snprintf/double)
     MessageAssembler& field(int tag_num, FixedPrice price) noexcept {
-        // Format price to string
         char buf[32];
-        double d = price.to_double();
-        int len = std::snprintf(buf, sizeof(buf), "%.8g", d);
+        int len = 0;
+        int64_t raw = price.raw;
+
+        bool negative = raw < 0;
+        if (negative) raw = -raw;
+
+        int64_t integer_part = raw / FixedPrice::SCALE;
+        int64_t frac_part = raw % FixedPrice::SCALE;
+
+        // Write integer part (reverse-then-flip, same pattern as int64_t overload)
+        if (integer_part == 0) {
+            buf[len++] = '0';
+        } else {
+            int start = len;
+            int64_t v = integer_part;
+            do {
+                buf[len++] = '0' + static_cast<char>(v % 10);
+                v /= 10;
+            } while (v > 0);
+            for (int i = start, j = len - 1; i < j; ++i, --j) {
+                char tmp = buf[i]; buf[i] = buf[j]; buf[j] = tmp;
+            }
+        }
+
+        if (frac_part > 0) {
+            // Strip trailing zeros from fractional part
+            int frac_digits = FixedPrice::DECIMAL_PLACES;
+            while (frac_part % 10 == 0 && frac_digits > 0) {
+                frac_part /= 10;
+                --frac_digits;
+            }
+
+            buf[len++] = '.';
+
+            // Write fractional digits (right-aligned within frac_digits width)
+            int frac_start = len;
+            int64_t v = frac_part;
+            int written = 0;
+            do {
+                buf[len++] = '0' + static_cast<char>(v % 10);
+                v /= 10;
+                ++written;
+            } while (v > 0);
+
+            // Pad leading zeros if needed (e.g. 0.005 -> frac_part=5, frac_digits=3)
+            while (written < frac_digits) {
+                buf[len++] = '0';
+                ++written;
+            }
+
+            // Reverse fractional digits
+            for (int i = frac_start, j = len - 1; i < j; ++i, --j) {
+                char tmp = buf[i]; buf[i] = buf[j]; buf[j] = tmp;
+            }
+        }
+
+        if (negative) {
+            // Shift right and prepend '-'
+            for (int i = len; i > 0; --i) buf[i] = buf[i - 1];
+            buf[0] = '-';
+            ++len;
+        }
+
         return field(tag_num, std::string_view{buf, static_cast<size_t>(len)});
     }
 
