@@ -47,6 +47,7 @@ inline double get_cpu_freq_ghz() noexcept {
         dummy += i;
     }
 
+    (void)dummy;
     uint64_t end_cycles = rdtsc();
     auto end_time = std::chrono::steady_clock::now();
 
