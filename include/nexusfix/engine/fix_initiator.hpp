@@ -113,6 +113,7 @@ public:
     [[nodiscard]] const SessionManager& session() const noexcept { return session_; }
     [[nodiscard]] const SessionStats& stats() const noexcept { return session_.stats(); }
     [[nodiscard]] TcpSocket& socket() noexcept { return socket_; }
+    [[nodiscard]] int reconnect_count() const noexcept { return reconnect_count_; }
 
 private:
     [[nodiscard]] SessionConfig make_session_config() const noexcept {
@@ -170,6 +171,7 @@ private:
 
         if (try_connect()) {
             reconnect_attempts_ = 0;
+            ++reconnect_count_;
             (void)session_.initiate_logon();
         }
     }
@@ -181,6 +183,7 @@ private:
     std::unique_ptr<SocketBridge<>> bridge_;
 
     int reconnect_attempts_{0};
+    int reconnect_count_{0};
     std::chrono::steady_clock::time_point last_reconnect_attempt_{};
 };
 

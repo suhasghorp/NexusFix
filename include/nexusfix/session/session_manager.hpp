@@ -182,6 +182,19 @@ public:
             return std::unexpected{SessionError{SessionErrorCode::InvalidState}};
         }
 
+        if (config_.reset_seq_num_on_logon) {
+            sequences_.reset();
+        } else if (message_store_) {
+            uint32_t sender_seq = message_store_->get_next_sender_seq_num();
+            uint32_t target_seq = message_store_->get_next_target_seq_num();
+            if (sender_seq > SequenceManager::INITIAL_SEQ_NUM) {
+                sequences_.set_outbound(sender_seq);
+            }
+            if (target_seq > SequenceManager::INITIAL_SEQ_NUM) {
+                sequences_.set_inbound(target_seq);
+            }
+        }
+
         // Build logon message
         auto msg = fix44::Logon::Builder{}
             .begin_string(config_.begin_string)
@@ -246,12 +259,14 @@ public:
         if (seq_result == SequenceManager::SequenceResult::GapDetected) {
             handle_sequence_gap(msg.msg_seq_num());
         } else if (seq_result == SequenceManager::SequenceResult::TooLow) {
-            // Possible duplicate, check PossDupFlag
             if (!msg.header().poss_dup_flag) {
-                // Sequence too low and not marked as duplicate
                 handle_sequence_error(msg.msg_seq_num());
                 return;
             }
+        }
+
+        if (seq_result == SequenceManager::SequenceResult::Ok && message_store_) {
+            message_store_->set_next_target_seq_num(sequences_.expected_inbound());
         }
 
         // Route by message type
@@ -462,29 +477,24 @@ private:
         uint32_t begin = static_cast<uint32_t>(*begin_seq);
         uint32_t end = static_cast<uint32_t>(*end_seq);
 
-        // Try to retrieve messages from store
         if (message_store_) {
             auto messages = message_store_->retrieve_range(begin, end);
 
             if (!messages.empty()) {
-                // Resend stored messages with PossDupFlag=Y
                 for (const auto& stored_msg : messages) {
-                    // Note: In production, we should modify the message to set
-                    // PossDupFlag=Y (tag 43) and update SendingTime (tag 52)
-                    // For now, resend as-is
+                    auto marked = mark_poss_dup(stored_msg);
+                    if (marked.empty()) continue;
                     if (callbacks_.on_send) {
-                        callbacks_.on_send(stored_msg);
+                        callbacks_.on_send(marked);
+                        heartbeat_timer_.message_sent();
                         ++stats_.messages_sent;
-                        stats_.bytes_sent += stored_msg.size();
+                        stats_.bytes_sent += marked.size();
                     }
                 }
                 return;
             }
         }
 
-        // Fallback: No store or messages not found - send SequenceReset (gap fill)
-        // Uses the requestor's BeginSeqNo, not our outbound counter, so bypass
-        // send_message() which assumes a prior next_outbound() call.
         auto response = fix44::SequenceReset::Builder{}
             .begin_string(config_.begin_string)
             .sender_comp_id(config_.sender_comp_id)
@@ -598,14 +608,12 @@ private:
             return false;
         }
 
-        // Store message for potential resend (only after successful send)
         if (message_store_) {
-            // current_outbound() is N+1 after next_outbound() returned N
             uint32_t next = sequences_.current_outbound();
             uint32_t sent_seq = (next <= SequenceManager::INITIAL_SEQ_NUM)
                 ? SequenceManager::MAX_SEQ_NUM : next - 1;
-            // Note: store() may fail if pool is full, but send already succeeded
             [[maybe_unused]] bool stored = message_store_->store(sent_seq, msg);
+            message_store_->set_next_sender_seq_num(next);
         }
         return true;
     }
@@ -647,6 +655,52 @@ private:
     }
 
     // ========================================================================
+    // Resend Support
+    // ========================================================================
+
+    /// Re-serialize a stored message with PossDupFlag=Y, OrigSendingTime,
+    /// and updated SendingTime. Returns a span into resend_asm_ (valid until
+    /// next call). Returns empty span on parse failure.
+    [[nodiscard]] std::span<const char> mark_poss_dup(
+        const std::vector<char>& stored) noexcept
+    {
+        auto parsed = ParsedMessage::parse(
+            std::span<const char>{stored.data(), stored.size()});
+        if (!parsed.has_value()) return {};
+
+        auto& p = *parsed;
+        std::string_view orig_time = p.sending_time();
+
+        resend_asm_.start(config_.begin_string)
+            .field(tag::MsgType::value, p.msg_type())
+            .field(tag::SenderCompID::value, config_.sender_comp_id)
+            .field(tag::TargetCompID::value, config_.target_comp_id)
+            .field(tag::MsgSeqNum::value, static_cast<int64_t>(p.msg_seq_num()))
+            .field(tag::SendingTime::value, current_timestamp())
+            .field(tag::PossDupFlag::value, 'Y')
+            .field(tag::OrigSendingTime::value, orig_time);
+
+        for (const auto& fv : p) {
+            int ftag = fv.tag;
+            if (ftag == tag::BeginString::value ||
+                ftag == tag::BodyLength::value ||
+                ftag == tag::MsgType::value ||
+                ftag == tag::SenderCompID::value ||
+                ftag == tag::TargetCompID::value ||
+                ftag == tag::MsgSeqNum::value ||
+                ftag == tag::SendingTime::value ||
+                ftag == tag::PossDupFlag::value ||
+                ftag == tag::OrigSendingTime::value ||
+                ftag == tag::CheckSum::value) {
+                continue;
+            }
+            resend_asm_.field(ftag, fv.as_string());
+        }
+
+        return resend_asm_.finish();
+    }
+
+    // ========================================================================
     // Utilities
     // ========================================================================
 
@@ -665,6 +719,7 @@ private:
     SessionCallbacks callbacks_;
     HeartbeatTimer heartbeat_timer_;
     MessageAssembler assembler_;
+    MessageAssembler resend_asm_;
     SequenceManager sequences_;
     SessionStats stats_;
     util::RdtscTimestamp timestamp_generator_;  // RDTSC-based: ~10ns vs ~50ns chrono

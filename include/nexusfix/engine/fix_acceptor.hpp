@@ -7,6 +7,7 @@
 
 #include "nexusfix/engine/socket_bridge.hpp"
 #include "nexusfix/session/session_manager.hpp"
+#include "nexusfix/store/i_message_store.hpp"
 #include "nexusfix/transport/tcp_transport.hpp"
 
 namespace nfx {
@@ -40,6 +41,10 @@ public:
     /// Set session callbacks (call before listen)
     void set_callbacks(SessionCallbacks callbacks) noexcept {
         user_callbacks_ = std::move(callbacks);
+    }
+
+    void set_message_store(store::IMessageStore* store) noexcept {
+        message_store_ = store;
     }
 
     /// Bind and listen. Returns actual port (useful with ephemeral port 0).
@@ -89,50 +94,60 @@ private:
     }
 
     void run_loop() noexcept {
-        auto accept_result = acceptor_.accept();
-        if (!accept_result.has_value()) return;
+        while (running_.load(std::memory_order_acquire)) {
+            auto accept_result = acceptor_.accept();
+            if (!accept_result.has_value()) return;
 
-        TcpSocket client_sock{*accept_result};
-        SessionManager session{make_session_config()};
+            logon_complete.store(false, std::memory_order_release);
+            logout_complete.store(false, std::memory_order_release);
 
-        SessionCallbacks cbs;
-        cbs.on_send = [&client_sock](std::span<const char> data) -> bool {
-            auto result = client_sock.send(data);
-            return result.has_value() && *result > 0;
-        };
-        cbs.on_logon = [this]() {
-            logon_complete.store(true, std::memory_order_release);
-            if (user_callbacks_.on_logon) user_callbacks_.on_logon();
-        };
-        cbs.on_logout = [this](std::string_view text) {
-            logout_complete.store(true, std::memory_order_release);
-            if (user_callbacks_.on_logout) user_callbacks_.on_logout(text);
-        };
-        cbs.on_app_message = [this](const ParsedMessage& msg) {
-            if (user_callbacks_.on_app_message) {
-                user_callbacks_.on_app_message(msg);
+            TcpSocket client_sock{*accept_result};
+            SessionManager session{make_session_config()};
+
+            if (message_store_) {
+                session.set_message_store(message_store_);
             }
-        };
-        cbs.on_state_change = user_callbacks_.on_state_change;
-        cbs.on_error = user_callbacks_.on_error;
 
-        session.set_callbacks(std::move(cbs));
-        session.on_connect();
+            SessionCallbacks cbs;
+            cbs.on_send = [&client_sock](std::span<const char> data) -> bool {
+                auto result = client_sock.send(data);
+                return result.has_value() && *result > 0;
+            };
+            cbs.on_logon = [this]() {
+                logon_complete.store(true, std::memory_order_release);
+                if (user_callbacks_.on_logon) user_callbacks_.on_logon();
+            };
+            cbs.on_logout = [this](std::string_view text) {
+                logout_complete.store(true, std::memory_order_release);
+                if (user_callbacks_.on_logout) user_callbacks_.on_logout(text);
+            };
+            cbs.on_app_message = [this](const ParsedMessage& msg) {
+                if (user_callbacks_.on_app_message) {
+                    user_callbacks_.on_app_message(msg);
+                }
+            };
+            cbs.on_state_change = user_callbacks_.on_state_change;
+            cbs.on_error = user_callbacks_.on_error;
 
-        SocketBridge<> bridge{client_sock, session};
+            session.set_callbacks(std::move(cbs));
+            session.on_connect();
 
-        while (running_.load(std::memory_order_acquire) && client_sock.is_connected()) {
-            bridge.poll_once(20);
-        }
+            SocketBridge<> bridge{client_sock, session};
 
-        if (client_sock.is_connected()) {
-            session.on_disconnect();
+            while (running_.load(std::memory_order_acquire) && client_sock.is_connected()) {
+                bridge.poll_once(20);
+            }
+
+            if (client_sock.is_connected()) {
+                session.on_disconnect();
+            }
         }
     }
 
     AcceptorConfig config_;
     TcpAcceptor acceptor_;
     SessionCallbacks user_callbacks_;
+    store::IMessageStore* message_store_{nullptr};
 
     std::atomic<bool> running_{false};
     std::thread background_thread_;

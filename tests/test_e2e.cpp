@@ -1171,6 +1171,281 @@ TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
     acceptor.stop();
 }
 
+TEST_CASE("E2E: FixInitiator reconnect_count tracks reconnections", "[e2e][reconnect][resilience]") {
+    TcpAcceptor raw_acceptor;
+    REQUIRE(raw_acceptor.listen(0).has_value());
+    uint16_t port = raw_acceptor.local_port();
+
+    std::atomic<bool> acceptor_running{true};
+    std::thread acceptor_thread([&] {
+        auto client_result = raw_acceptor.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "RECONN";
+        sc.heart_bt_int = 30;
+        sc.validate_comp_ids = false;
+        SessionManager session{sc};
+
+        SessionCallbacks cbs;
+        cbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        session.set_callbacks(std::move(cbs));
+        session.on_connect();
+
+        SocketBridge<> bridge{client, session};
+        while (acceptor_running.load(std::memory_order_acquire) && client.is_connected()) {
+            bridge.poll_once(20);
+        }
+    });
+
+    InitiatorConfig iconfig;
+    iconfig.host = "127.0.0.1";
+    iconfig.port = port;
+    iconfig.sender_comp_id = "RECONN";
+    iconfig.target_comp_id = "ACCEPTOR";
+    iconfig.heart_bt_int = 30;
+    iconfig.validate_comp_ids = false;
+    iconfig.auto_reconnect = true;
+    iconfig.reconnect_delay_ms = 200;
+    iconfig.max_reconnect_attempts = 10;
+
+    FixInitiator initiator{iconfig};
+
+    std::atomic<int> logon_count{0};
+    SessionCallbacks cbs;
+    cbs.on_logon = [&logon_count]() {
+        logon_count.fetch_add(1, std::memory_order_release);
+    };
+    initiator.set_callbacks(std::move(cbs));
+
+    auto start_result = initiator.start();
+    REQUIRE(start_result.has_value());
+
+    bool active = initiator.poll_until([&] {
+        return logon_count.load(std::memory_order_acquire) >= 1;
+    });
+    REQUIRE(active);
+    CHECK(initiator.reconnect_count() == 0);
+
+    // Kill acceptor
+    acceptor_running.store(false, std::memory_order_release);
+    raw_acceptor.close();
+    acceptor_thread.join();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    initiator.poll(50);
+    initiator.poll(50);
+    CHECK(initiator.state() == SessionState::Reconnecting);
+
+    // Start new acceptor on same port
+    TcpAcceptor raw_acceptor2;
+    auto listen2 = raw_acceptor2.listen(port);
+    if (!listen2.has_value()) {
+        WARN("Could not rebind port " << port << ", skipping reconnect_count verification");
+        return;
+    }
+
+    std::atomic<bool> acceptor2_running{true};
+    std::thread acceptor2_thread([&] {
+        auto client_result = raw_acceptor2.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "RECONN";
+        sc.heart_bt_int = 30;
+        sc.validate_comp_ids = false;
+        SessionManager session{sc};
+
+        SessionCallbacks scbs;
+        scbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        session.set_callbacks(std::move(scbs));
+        session.on_connect();
+
+        SocketBridge<> bridge{client, session};
+        while (acceptor2_running.load(std::memory_order_acquire) && client.is_connected()) {
+            bridge.poll_once(20);
+        }
+    });
+
+    bool reconnected = initiator.poll_until([&] {
+        return logon_count.load(std::memory_order_acquire) >= 2;
+    }, 5000);
+
+    CHECK(reconnected);
+    if (reconnected) {
+        CHECK(initiator.reconnect_count() == 1);
+    }
+
+    acceptor2_running.store(false, std::memory_order_release);
+    raw_acceptor2.close();
+    acceptor2_thread.join();
+}
+
+TEST_CASE("E2E: FixAcceptor accepts reconnection from same peer", "[e2e][reconnect][resilience]") {
+    AcceptorConfig aconfig;
+    aconfig.port = 0;
+    aconfig.sender_comp_id = "FIX_ACPT";
+    aconfig.target_comp_id = "FIX_INIT";
+    aconfig.heart_bt_int = 30;
+    aconfig.validate_comp_ids = false;
+
+    FixAcceptor acceptor{aconfig};
+
+    auto listen_result = acceptor.listen();
+    REQUIRE(listen_result.has_value());
+    uint16_t port = *listen_result;
+    REQUIRE(port != 0);
+    acceptor.start_background();
+
+    // First connection
+    {
+        InitiatorConfig iconfig;
+        iconfig.host = "127.0.0.1";
+        iconfig.port = port;
+        iconfig.sender_comp_id = "FIX_INIT";
+        iconfig.target_comp_id = "FIX_ACPT";
+        iconfig.heart_bt_int = 30;
+        iconfig.validate_comp_ids = false;
+        iconfig.auto_reconnect = false;
+
+        FixInitiator initiator{iconfig};
+        std::atomic<bool> logon_ok{false};
+        SessionCallbacks cbs;
+        cbs.on_logon = [&logon_ok]() { logon_ok.store(true, std::memory_order_release); };
+        initiator.set_callbacks(std::move(cbs));
+
+        REQUIRE(initiator.start().has_value());
+        REQUIRE(initiator.poll_until([&] {
+            return logon_ok.load(std::memory_order_acquire);
+        }));
+        REQUIRE(initiator.is_active());
+
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!acceptor.logon_complete.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CHECK(acceptor.logon_complete.load());
+    }
+    // Initiator destroyed -> TCP close
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Second connection to same acceptor
+    {
+        InitiatorConfig iconfig;
+        iconfig.host = "127.0.0.1";
+        iconfig.port = port;
+        iconfig.sender_comp_id = "FIX_INIT";
+        iconfig.target_comp_id = "FIX_ACPT";
+        iconfig.heart_bt_int = 30;
+        iconfig.validate_comp_ids = false;
+        iconfig.auto_reconnect = false;
+        iconfig.reset_seq_num_on_logon = true;
+
+        FixInitiator initiator{iconfig};
+        std::atomic<bool> logon_ok{false};
+        SessionCallbacks cbs;
+        cbs.on_logon = [&logon_ok]() { logon_ok.store(true, std::memory_order_release); };
+        initiator.set_callbacks(std::move(cbs));
+
+        REQUIRE(initiator.start().has_value());
+        bool second_logon = initiator.poll_until([&] {
+            return logon_ok.load(std::memory_order_acquire);
+        }, 3000);
+
+        CHECK(second_logon);
+        if (second_logon) {
+            CHECK(initiator.is_active());
+        }
+    }
+
+    acceptor.stop();
+}
+
+TEST_CASE("E2E: Sequence numbers persist across reconnect with store", "[e2e][reconnect][resilience]") {
+    TcpAcceptor raw_acceptor;
+    REQUIRE(raw_acceptor.listen(0).has_value());
+    uint16_t port = raw_acceptor.local_port();
+
+    std::atomic<bool> acceptor_running{true};
+    std::atomic<bool> first_logon{false};
+    std::thread acceptor_thread([&] {
+        auto client_result = raw_acceptor.accept();
+        if (!client_result.has_value()) return;
+
+        TcpSocket client{*client_result};
+        SessionConfig sc;
+        sc.sender_comp_id = "ACCEPTOR";
+        sc.target_comp_id = "SEQTEST";
+        sc.heart_bt_int = 30;
+        sc.validate_comp_ids = false;
+        SessionManager session{sc};
+
+        SessionCallbacks cbs;
+        cbs.on_send = [&client](std::span<const char> data) -> bool {
+            auto r = client.send(data);
+            return r.has_value() && *r > 0;
+        };
+        cbs.on_logon = [&first_logon]() {
+            first_logon.store(true, std::memory_order_release);
+        };
+        session.set_callbacks(std::move(cbs));
+        session.on_connect();
+
+        SocketBridge<> bridge{client, session};
+        while (acceptor_running.load(std::memory_order_acquire) && client.is_connected()) {
+            bridge.poll_once(20);
+        }
+    });
+
+    // Create initiator with message store
+    InitiatorConfig iconfig;
+    iconfig.host = "127.0.0.1";
+    iconfig.port = port;
+    iconfig.sender_comp_id = "SEQTEST";
+    iconfig.target_comp_id = "ACCEPTOR";
+    iconfig.heart_bt_int = 30;
+    iconfig.validate_comp_ids = false;
+    iconfig.auto_reconnect = false;
+    iconfig.reset_seq_num_on_logon = false;
+
+    FixInitiator initiator{iconfig};
+
+    store::MemoryMessageStore msg_store("SEQTEST-ACCEPTOR");
+    initiator.set_message_store(&msg_store);
+
+    std::atomic<bool> logon_ok{false};
+    SessionCallbacks cbs;
+    cbs.on_logon = [&logon_ok]() { logon_ok.store(true, std::memory_order_release); };
+    initiator.set_callbacks(std::move(cbs));
+
+    REQUIRE(initiator.start().has_value());
+    REQUIRE(initiator.poll_until([&] {
+        return logon_ok.load(std::memory_order_acquire);
+    }));
+    REQUIRE(initiator.is_active());
+
+    // After logon: sender seq should be 2 (logon was seq=1)
+    CHECK(msg_store.get_next_sender_seq_num() == 2);
+    // After receiving logon response: target seq should be 2
+    CHECK(msg_store.get_next_target_seq_num() == 2);
+
+    acceptor_running.store(false, std::memory_order_release);
+    raw_acceptor.close();
+    acceptor_thread.join();
+}
+
 TEST_CASE("E2E: FixInitiator reconnects after acceptor restart", "[e2e][reconnect]") {
     // Use a dedicated acceptor that listens on a specific port
     TcpAcceptor raw_acceptor;

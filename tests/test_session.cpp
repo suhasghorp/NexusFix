@@ -10,6 +10,7 @@
 #include "nexusfix/session/session_handler.hpp"
 #include "nexusfix/session/coroutine.hpp"
 #include "nexusfix/store/i_message_store.hpp"
+#include "nexusfix/store/memory_message_store.hpp"
 
 using namespace nfx;
 
@@ -1657,6 +1658,116 @@ TEST_CASE("SequenceReset gap-fill send failure does not rollback outbound", "[se
     // Outbound sequence must NOT have been rolled back
     // (transmit() doesn't touch sequences)
     REQUIRE(ts.session.sequences().current_outbound() == seq_before);
+}
+
+TEST_CASE("Sequence numbers persisted to store after send", "[session][store][resilience]") {
+    SessionConfig config{};
+    config.sender_comp_id = "SENDER";
+    config.target_comp_id = "TARGET";
+
+    SessionManager session(config);
+
+    store::NullMessageStore store("SEQ-PERSIST");
+    session.set_message_store(&store);
+
+    SessionCallbacks cbs;
+    cbs.on_send = [](std::span<const char>) -> bool { return true; };
+    cbs.on_logon = []() {};
+    session.set_callbacks(std::move(cbs));
+
+    session.on_connect();
+    (void)session.initiate_logon();
+
+    // After logon send, store should have sender seq = 2 (next after 1)
+    CHECK(store.get_next_sender_seq_num() == 2);
+
+    // Feed logon response to reach Active
+    auto logon = build_logon("TARGET", "SENDER", 1, 30);
+    session.on_data_received(
+        std::span<const char>{logon.data(), logon.size()});
+
+    // After receiving seq 1, expected inbound is 2
+    CHECK(store.get_next_target_seq_num() == 2);
+}
+
+TEST_CASE("Sequence numbers restored from store on logon", "[session][store][resilience]") {
+    SessionConfig config{};
+    config.sender_comp_id = "SENDER";
+    config.target_comp_id = "TARGET";
+    config.reset_seq_num_on_logon = false;
+
+    SessionManager session(config);
+
+    store::NullMessageStore store("SEQ-RESTORE");
+    store.set_next_sender_seq_num(10);
+    store.set_next_target_seq_num(20);
+    session.set_message_store(&store);
+
+    std::vector<std::vector<char>> sent;
+    SessionCallbacks cbs;
+    cbs.on_send = [&sent](std::span<const char> data) -> bool {
+        sent.emplace_back(data.begin(), data.end());
+        return true;
+    };
+    session.set_callbacks(std::move(cbs));
+
+    session.on_connect();
+    (void)session.initiate_logon();
+
+    // Logon should use seq 10 (restored from store)
+    REQUIRE(!sent.empty());
+    std::string logon_msg(sent[0].begin(), sent[0].end());
+    CHECK(logon_msg.find("34=10") != std::string::npos);
+
+    // Expected inbound should be 20
+    CHECK(session.sequences().expected_inbound() == 20);
+}
+
+TEST_CASE("ResendRequest replays with PossDupFlag=Y", "[session][resend][resilience]") {
+    SessionConfig config{};
+    config.sender_comp_id = "SENDER";
+    config.target_comp_id = "TARGET";
+
+    SessionManager session(config);
+
+    store::MemoryMessageStore store("RESEND-POSS");
+    session.set_message_store(&store);
+
+    std::vector<std::vector<char>> sent;
+    SessionCallbacks cbs;
+    cbs.on_send = [&sent](std::span<const char> data) -> bool {
+        sent.emplace_back(data.begin(), data.end());
+        return true;
+    };
+    cbs.on_logon = []() {};
+    session.set_callbacks(std::move(cbs));
+
+    // Establish session
+    session.on_connect();
+    (void)session.initiate_logon();
+
+    auto logon = build_logon("TARGET", "SENDER", 1, 30);
+    session.on_data_received(
+        std::span<const char>{logon.data(), logon.size()});
+    REQUIRE(session.state() == SessionState::Active);
+
+    size_t sent_before = sent.size();
+
+    // Counterparty asks to resend seq 1 (our logon)
+    auto resend_req = build_resend_request("TARGET", "SENDER", 2, 1, 1);
+    session.on_data_received(
+        std::span<const char>{resend_req.data(), resend_req.size()});
+
+    // Should have sent a resend
+    REQUIRE(sent.size() > sent_before);
+
+    std::string resent(sent.back().begin(), sent.back().end());
+    // Must contain PossDupFlag=Y (tag 43)
+    CHECK(resent.find("43=Y") != std::string::npos);
+    // Must contain OrigSendingTime (tag 122)
+    CHECK(resent.find("122=") != std::string::npos);
+    // Must retain original MsgSeqNum
+    CHECK(resent.find("34=1") != std::string::npos);
 }
 
 TEST_CASE("IMessageStore polymorphic access", "[session][store][regression]") {
