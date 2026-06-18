@@ -1167,7 +1167,7 @@ TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
     CHECK(app_msg_received.load());
 
     // Cleanup
-    initiator.stop();
+    (void)initiator.stop();
     acceptor.stop();
 }
 
