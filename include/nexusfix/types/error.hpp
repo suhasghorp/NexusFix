@@ -205,10 +205,12 @@ enum class SessionErrorCode : uint8_t {
     HeartbeatTimeout,
     SequenceGap,
     InvalidState,
-    Disconnected
+    Disconnected,
+    CompIdMismatch,
+    SendingTimeAccuracy
 };
 
-inline constexpr size_t SESSION_ERROR_COUNT = 9;
+inline constexpr size_t SESSION_ERROR_COUNT = 11;
 
 // ============================================================================
 // Compile-time SessionError Info (TICKET_023)
@@ -257,18 +259,28 @@ template<> struct SessionErrorInfo<SessionErrorCode::Disconnected> {
     static constexpr std::string_view message = "Disconnected";
 };
 
+template<> struct SessionErrorInfo<SessionErrorCode::CompIdMismatch> {
+    static constexpr std::string_view message = "CompID mismatch";
+};
+
+template<> struct SessionErrorInfo<SessionErrorCode::SendingTimeAccuracy> {
+    static constexpr std::string_view message = "SendingTime accuracy problem";
+};
+
 /// Generate SessionError lookup table at compile time
 consteval std::array<std::string_view, SESSION_ERROR_COUNT> create_session_error_table() {
     std::array<std::string_view, SESSION_ERROR_COUNT> table{};
-    table[0] = SessionErrorInfo<SessionErrorCode::None>::message;
-    table[1] = SessionErrorInfo<SessionErrorCode::NotConnected>::message;
-    table[2] = SessionErrorInfo<SessionErrorCode::AlreadyConnected>::message;
-    table[3] = SessionErrorInfo<SessionErrorCode::LogonRejected>::message;
-    table[4] = SessionErrorInfo<SessionErrorCode::LogonTimeout>::message;
-    table[5] = SessionErrorInfo<SessionErrorCode::HeartbeatTimeout>::message;
-    table[6] = SessionErrorInfo<SessionErrorCode::SequenceGap>::message;
-    table[7] = SessionErrorInfo<SessionErrorCode::InvalidState>::message;
-    table[8] = SessionErrorInfo<SessionErrorCode::Disconnected>::message;
+    table[0]  = SessionErrorInfo<SessionErrorCode::None>::message;
+    table[1]  = SessionErrorInfo<SessionErrorCode::NotConnected>::message;
+    table[2]  = SessionErrorInfo<SessionErrorCode::AlreadyConnected>::message;
+    table[3]  = SessionErrorInfo<SessionErrorCode::LogonRejected>::message;
+    table[4]  = SessionErrorInfo<SessionErrorCode::LogonTimeout>::message;
+    table[5]  = SessionErrorInfo<SessionErrorCode::HeartbeatTimeout>::message;
+    table[6]  = SessionErrorInfo<SessionErrorCode::SequenceGap>::message;
+    table[7]  = SessionErrorInfo<SessionErrorCode::InvalidState>::message;
+    table[8]  = SessionErrorInfo<SessionErrorCode::Disconnected>::message;
+    table[9]  = SessionErrorInfo<SessionErrorCode::CompIdMismatch>::message;
+    table[10] = SessionErrorInfo<SessionErrorCode::SendingTimeAccuracy>::message;
     return table;
 }
 

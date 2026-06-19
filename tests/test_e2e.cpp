@@ -761,6 +761,7 @@ TEST_CASE("E2E: PossDupFlag on resent messages accepted for TooLow seq", "[e2e][
     config.target_comp_id = "ACPT";
     config.heart_bt_int = 30;
     config.validate_comp_ids = false;
+    config.check_latency = false;
 
     SessionManager session{config};
 

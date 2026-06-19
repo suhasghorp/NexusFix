@@ -779,6 +779,7 @@ struct TestSession {
         config.sender_comp_id = sender;
         config.target_comp_id = target;
         config.heart_bt_int = 30;
+        config.check_latency = false;
         // Reconstruct with proper config
         session.~SessionManager();
         new (&session) SessionManager(config);
@@ -1727,6 +1728,7 @@ TEST_CASE("ResendRequest replays with PossDupFlag=Y", "[session][resend][resilie
     SessionConfig config{};
     config.sender_comp_id = "SENDER";
     config.target_comp_id = "TARGET";
+    config.check_latency = false;
 
     SessionManager session(config);
 

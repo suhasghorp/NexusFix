@@ -269,8 +269,10 @@ constexpr HeaderParseResult parse_header(
     FieldIterator iter{data};
     int fields_parsed = 0;
 
-    // Parse required header fields in order
-    while (iter.has_next() && fields_parsed < 7) [[likely]] {
+    // Parse header fields: 7 required + optional (PossDupFlag, PossResend, OrigSendingTime).
+    // The default case breaks the loop on the first non-header tag.
+    constexpr int MAX_HEADER_FIELDS = 10;
+    while (iter.has_next() && fields_parsed < MAX_HEADER_FIELDS) [[likely]] {
         FieldView field = iter.next();
         if (!field.is_valid()) [[unlikely]] {
             auto code = iter.last_error();

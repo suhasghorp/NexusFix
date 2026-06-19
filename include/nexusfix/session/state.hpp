@@ -411,6 +411,8 @@ struct SessionConfig {
     bool validate_comp_ids{true};
     bool validate_checksum{true};
     bool persist_messages{false};
+    bool check_latency{true};
+    int max_latency{120};
 
     // CPU affinity (for latency optimization)
     int cpu_affinity_core{-1};      // Pin session thread to specific core (-1 = auto/disabled)
@@ -434,6 +436,7 @@ struct SessionStats {
     uint64_t test_requests_sent{0};
     uint64_t resend_requests_sent{0};
     uint64_t sequence_resets{0};
+    uint64_t rejects_sent{0};
     uint64_t reconnect_count{0};
 
     using TimePoint = std::chrono::steady_clock::time_point;
@@ -453,6 +456,7 @@ struct SessionStats {
         test_requests_sent = 0;
         resend_requests_sent = 0;
         sequence_resets = 0;
+        rejects_sent = 0;
         reconnect_count = 0;
     }
 };

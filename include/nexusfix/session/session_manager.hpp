@@ -86,8 +86,10 @@ public:
         if (test_request_pending_) return false;
 
         auto now = Clock::now();
-        auto elapsed = std::chrono::duration_cast<Duration>(now - last_received_);
-        return elapsed >= interval_ + Duration{interval_.count() / 2};
+        using Millis = std::chrono::milliseconds;
+        auto elapsed = std::chrono::duration_cast<Millis>(now - last_received_);
+        auto threshold = std::chrono::duration_cast<Millis>(interval_) * 3 / 2;
+        return elapsed >= threshold;
     }
 
     /// Check if connection has timed out
@@ -253,6 +255,33 @@ public:
         }
 
         auto& msg = *result;
+
+        // Validate CompID (QuickFIX: isCorrectCompID)
+        if (config_.validate_comp_ids && state_ != SessionState::SocketConnected) {
+            if (msg.header().sender_comp_id != config_.target_comp_id ||
+                msg.header().target_comp_id != config_.sender_comp_id) {
+                send_reject(msg.msg_seq_num(), 9, 0, "CompID problem");
+                send_logout_and_disconnect("Incorrect SenderCompID or TargetCompID");
+                return;
+            }
+        }
+
+        // Validate SendingTime accuracy (QuickFIX: isGoodTime)
+        if (config_.check_latency && state_ == SessionState::Active) {
+            if (!is_sending_time_accurate(msg.sending_time())) {
+                send_reject(msg.msg_seq_num(), 10, 0, "SendingTime accuracy problem");
+                send_logout_and_disconnect("SendingTime accuracy problem");
+                return;
+            }
+        }
+
+        // Validate PossDupFlag + OrigSendingTime (QuickFIX: doPossDup)
+        if (msg.header().poss_dup_flag) {
+            if (msg.header().orig_sending_time.empty()) {
+                send_reject(msg.msg_seq_num(), 1, 122, "Required tag missing");
+                return;
+            }
+        }
 
         // Validate sequence number
         auto seq_result = sequences_.validate_inbound(msg.msg_seq_num());
@@ -512,15 +541,16 @@ private:
         ++stats_.sequence_resets;
 
         if (auto new_seq = msg.get_int(36)) {  // NewSeqNo
+            uint32_t new_seq_no = static_cast<uint32_t>(*new_seq);
             bool gap_fill = msg.get_char(123) == 'Y';  // GapFillFlag
 
-            if (gap_fill) {
-                // Gap fill - update expected without error
-                sequences_.set_inbound(static_cast<uint32_t>(*new_seq));
-            } else {
-                // Hard reset
-                sequences_.set_inbound(static_cast<uint32_t>(*new_seq));
+            if (gap_fill && new_seq_no < sequences_.expected_inbound()) {
+                send_reject(msg.msg_seq_num(), 5, 36,
+                    "Value is incorrect (NewSeqNo too low)");
+                return;
             }
+
+            sequences_.set_inbound(new_seq_no);
         }
     }
 
@@ -652,6 +682,94 @@ private:
             heartbeat_timer_.test_request_sent();
             ++stats_.test_requests_sent;
         }
+    }
+
+    // ========================================================================
+    // Reject / Defensive Helpers (QuickFIX parity)
+    // ========================================================================
+
+    void send_reject(uint32_t ref_seq_num, int reason, int ref_tag_id,
+                     std::string_view text) noexcept {
+        auto msg = fix44::Reject::Builder{}
+            .begin_string(config_.begin_string)
+            .sender_comp_id(config_.sender_comp_id)
+            .target_comp_id(config_.target_comp_id)
+            .msg_seq_num(sequences_.next_outbound())
+            .sending_time(current_timestamp())
+            .ref_seq_num(ref_seq_num)
+            .ref_tag_id(ref_tag_id)
+            .session_reject_reason(reason)
+            .text(text)
+            .build(assembler_);
+
+        if (send_message(msg)) {
+            ++stats_.rejects_sent;
+        }
+    }
+
+    void send_logout_and_disconnect(std::string_view reason) noexcept {
+        auto msg = fix44::Logout::Builder{}
+            .begin_string(config_.begin_string)
+            .sender_comp_id(config_.sender_comp_id)
+            .target_comp_id(config_.target_comp_id)
+            .msg_seq_num(sequences_.next_outbound())
+            .sending_time(current_timestamp())
+            .text(reason)
+            .build(assembler_);
+
+        send_message(msg);
+        transition(SessionEvent::Disconnect);
+
+        if (callbacks_.on_error) {
+            callbacks_.on_error(SessionError{SessionErrorCode::CompIdMismatch});
+        }
+    }
+
+    [[nodiscard]] bool is_sending_time_accurate(
+        std::string_view sending_time) const noexcept
+    {
+        if (sending_time.size() < 17) return false;
+
+        // Parse YYYYMMDD-HH:MM:SS from sending_time
+        auto parse2 = [](const char* p) -> int {
+            return (p[0] - '0') * 10 + (p[1] - '0');
+        };
+        auto parse4 = [](const char* p) -> int {
+            return (p[0] - '0') * 1000 + (p[1] - '0') * 100 +
+                   (p[2] - '0') * 10 + (p[3] - '0');
+        };
+
+        const char* s = sending_time.data();
+        int year = parse4(s);
+        int month = parse2(s + 4);
+        int day = parse2(s + 6);
+        int hour = parse2(s + 9);
+        int minute = parse2(s + 12);
+        int second = parse2(s + 15);
+
+        // Convert to epoch-like seconds (simplified, sufficient for latency check)
+        // Days since 2000-01-01 (approximate, ignoring leap year edge cases
+        // beyond what a latency check needs)
+        auto days_from_ymd = [](int y, int m, int d) -> int64_t {
+            y -= (m <= 2);
+            int era = y / 400;
+            int yoe = y - era * 400;
+            int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+            int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            return era * 146097 + doe - 719468;
+        };
+
+        int64_t msg_epoch = days_from_ymd(year, month, day) * 86400 +
+                            hour * 3600 + minute * 60 + second;
+
+        auto now = std::chrono::system_clock::now();
+        auto now_epoch = std::chrono::duration_cast<std::chrono::seconds>(
+            now.time_since_epoch()).count();
+
+        int64_t diff = now_epoch - msg_epoch;
+        if (diff < 0) diff = -diff;
+
+        return diff <= config_.max_latency;
     }
 
     // ========================================================================
