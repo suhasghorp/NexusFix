@@ -683,11 +683,11 @@ TEST_CASE("QFP-3B: TestRequest sent after 1.5x HeartBtInt no receive",
     REQUIRE(session.state() == SessionState::Active);
     capture.clear();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-    session.on_timer_tick();
-    capture.clear();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    // Sleep past 1.5x HeartBtInt (1500ms) but under 2x (2000ms) timeout.
+    // Single sleep avoids the flaky two-step approach where OS scheduling
+    // jitter on CI could push the first sleep past the TestRequest threshold,
+    // causing capture.clear() to erase it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1700));
     session.on_timer_tick();
 
     REQUIRE(capture.has_msg_type(msg_type::TestRequest));
