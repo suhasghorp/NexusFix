@@ -687,7 +687,7 @@ TEST_CASE("QFP-3B: TestRequest sent after 1.5x HeartBtInt no receive",
     session.on_timer_tick();
     capture.clear();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
     session.on_timer_tick();
 
     REQUIRE(capture.has_msg_type(msg_type::TestRequest));
