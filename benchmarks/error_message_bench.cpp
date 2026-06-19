@@ -51,6 +51,8 @@ namespace old_impl {
         case nfx::SessionErrorCode::SequenceGap:     return "Sequence gap detected";
         case nfx::SessionErrorCode::InvalidState:    return "Invalid session state";
         case nfx::SessionErrorCode::Disconnected:    return "Disconnected";
+        case nfx::SessionErrorCode::CompIdMismatch:  return "CompID mismatch";
+        case nfx::SessionErrorCode::SendingTimeAccuracy: return "SendingTime accuracy problem";
     }
     return "Unknown error";
 }
@@ -135,7 +137,7 @@ constexpr std::array<nfx::ParseErrorCode, 15> ALL_PARSE_ERRORS = {
     nfx::ParseErrorCode::FieldCountExceeded
 };
 
-constexpr std::array<nfx::SessionErrorCode, 9> ALL_SESSION_ERRORS = {
+constexpr std::array<nfx::SessionErrorCode, 11> ALL_SESSION_ERRORS = {
     nfx::SessionErrorCode::None,
     nfx::SessionErrorCode::NotConnected,
     nfx::SessionErrorCode::AlreadyConnected,
@@ -144,7 +146,9 @@ constexpr std::array<nfx::SessionErrorCode, 9> ALL_SESSION_ERRORS = {
     nfx::SessionErrorCode::HeartbeatTimeout,
     nfx::SessionErrorCode::SequenceGap,
     nfx::SessionErrorCode::InvalidState,
-    nfx::SessionErrorCode::Disconnected
+    nfx::SessionErrorCode::Disconnected,
+    nfx::SessionErrorCode::CompIdMismatch,
+    nfx::SessionErrorCode::SendingTimeAccuracy
 };
 
 constexpr std::array<nfx::TransportErrorCode, 20> ALL_TRANSPORT_ERRORS = {
@@ -239,7 +243,7 @@ int main() {
     // Benchmark 2: SessionError message()
     // ========================================================================
 
-    std::cout << "--- SessionError (9 codes, " << ITERATIONS << " iterations) ---\n\n";
+    std::cout << "--- SessionError (11 codes, " << ITERATIONS << " iterations) ---\n\n";
 
     // OLD: Switch-based
     uint64_t old_session_start = rdtsc();
@@ -395,7 +399,7 @@ int main() {
     std::cout << "|------------------|--------------|--------------|-------------|\n";
     std::cout << "| Average          |              |              | " << avg_improvement << "% |\n";
 
-    std::cout << "\nTotal switch cases eliminated: 53 (15 + 9 + 20 + 9)\n";
+    std::cout << "\nTotal switch cases eliminated: 55 (15 + 11 + 20 + 9)\n";
 
     return 0;
 }
