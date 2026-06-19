@@ -1018,7 +1018,7 @@ TEST_CASE("QFP-8A: SendingTime within max_latency accepted",
     auto now_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
     gmtime_r(&now_t, &tm);
-    char ts_buf[32];
+    char ts_buf[64];
     std::snprintf(ts_buf, sizeof(ts_buf), "%04d%02d%02d-%02d:%02d:%02d.000",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
@@ -1082,7 +1082,7 @@ TEST_CASE("QFP-8B: SendingTime too old -> reject + logout",
     auto now_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
     gmtime_r(&now_t, &tm);
-    char ts_buf[32];
+    char ts_buf[64];
     std::snprintf(ts_buf, sizeof(ts_buf), "%04d%02d%02d-%02d:%02d:%02d.000",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
