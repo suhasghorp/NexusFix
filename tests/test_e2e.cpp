@@ -32,6 +32,7 @@ public:
         config_.target_comp_id = "INITIATOR";
         config_.heart_bt_int = 30;
         config_.validate_comp_ids = false;
+        config_.check_latency = false;
     }
 
     ~AcceptorEndpoint() {
@@ -178,6 +179,7 @@ public:
         config_.target_comp_id = "ACCEPTOR";
         config_.heart_bt_int = 30;
         config_.validate_comp_ids = false;
+        config_.check_latency = false;
 
         session_ = std::make_unique<SessionManager>(config_);
 
