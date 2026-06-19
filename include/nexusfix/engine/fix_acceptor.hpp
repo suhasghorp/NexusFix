@@ -22,6 +22,7 @@ struct AcceptorConfig {
 
     int heart_bt_int{30};
     bool validate_comp_ids{false};
+    bool check_latency{true};
 
     constexpr AcceptorConfig() noexcept = default;
 };
@@ -90,6 +91,7 @@ private:
         sc.begin_string = config_.begin_string;
         sc.heart_bt_int = config_.heart_bt_int;
         sc.validate_comp_ids = config_.validate_comp_ids;
+        sc.check_latency = config_.check_latency;
         return sc;
     }
 

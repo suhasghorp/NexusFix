@@ -898,6 +898,7 @@ TEST_CASE("E2E: Heartbeat fires via SocketBridge timer", "[e2e][heartbeat]") {
         sc.target_comp_id = "INITIATOR";
         sc.heart_bt_int = 1;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager peer_session{sc};
 
         SessionCallbacks pcbs;
@@ -1041,6 +1042,7 @@ TEST_CASE("E2E: FixInitiator lifecycle", "[e2e][initiator]") {
     iconfig.target_comp_id = "ACCEPTOR";
     iconfig.heart_bt_int = 30;
     iconfig.validate_comp_ids = false;
+    iconfig.check_latency = false;
     iconfig.auto_reconnect = false;
 
     FixInitiator initiator{iconfig};
@@ -1102,6 +1104,7 @@ TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
     aconfig.target_comp_id = "FIX_INIT";
     aconfig.heart_bt_int = 30;
     aconfig.validate_comp_ids = false;
+    aconfig.check_latency = false;
 
     FixAcceptor acceptor{aconfig};
 
@@ -1130,6 +1133,7 @@ TEST_CASE("E2E: FixAcceptor lifecycle", "[e2e][acceptor]") {
     iconfig.target_comp_id = "FIX_ACPT";
     iconfig.heart_bt_int = 30;
     iconfig.validate_comp_ids = false;
+    iconfig.check_latency = false;
     iconfig.auto_reconnect = false;
 
     FixInitiator initiator{iconfig};
@@ -1191,6 +1195,7 @@ TEST_CASE("E2E: FixInitiator reconnect_count tracks reconnections", "[e2e][recon
         sc.target_comp_id = "RECONN";
         sc.heart_bt_int = 30;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager session{sc};
 
         SessionCallbacks cbs;
@@ -1214,6 +1219,7 @@ TEST_CASE("E2E: FixInitiator reconnect_count tracks reconnections", "[e2e][recon
     iconfig.target_comp_id = "ACCEPTOR";
     iconfig.heart_bt_int = 30;
     iconfig.validate_comp_ids = false;
+    iconfig.check_latency = false;
     iconfig.auto_reconnect = true;
     iconfig.reconnect_delay_ms = 200;
     iconfig.max_reconnect_attempts = 10;
@@ -1265,6 +1271,7 @@ TEST_CASE("E2E: FixInitiator reconnect_count tracks reconnections", "[e2e][recon
         sc.target_comp_id = "RECONN";
         sc.heart_bt_int = 30;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager session{sc};
 
         SessionCallbacks scbs;
@@ -1302,6 +1309,7 @@ TEST_CASE("E2E: FixAcceptor accepts reconnection from same peer", "[e2e][reconne
     aconfig.target_comp_id = "FIX_INIT";
     aconfig.heart_bt_int = 30;
     aconfig.validate_comp_ids = false;
+    aconfig.check_latency = false;
 
     FixAcceptor acceptor{aconfig};
 
@@ -1320,6 +1328,7 @@ TEST_CASE("E2E: FixAcceptor accepts reconnection from same peer", "[e2e][reconne
         iconfig.target_comp_id = "FIX_ACPT";
         iconfig.heart_bt_int = 30;
         iconfig.validate_comp_ids = false;
+        iconfig.check_latency = false;
         iconfig.auto_reconnect = false;
 
         FixInitiator initiator{iconfig};
@@ -1354,6 +1363,7 @@ TEST_CASE("E2E: FixAcceptor accepts reconnection from same peer", "[e2e][reconne
         iconfig.target_comp_id = "FIX_ACPT";
         iconfig.heart_bt_int = 30;
         iconfig.validate_comp_ids = false;
+        iconfig.check_latency = false;
         iconfig.auto_reconnect = false;
         iconfig.reset_seq_num_on_logon = true;
 
@@ -1394,6 +1404,7 @@ TEST_CASE("E2E: Sequence numbers persist across reconnect with store", "[e2e][re
         sc.target_comp_id = "SEQTEST";
         sc.heart_bt_int = 30;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager session{sc};
 
         SessionCallbacks cbs;
@@ -1421,6 +1432,7 @@ TEST_CASE("E2E: Sequence numbers persist across reconnect with store", "[e2e][re
     iconfig.target_comp_id = "ACCEPTOR";
     iconfig.heart_bt_int = 30;
     iconfig.validate_comp_ids = false;
+    iconfig.check_latency = false;
     iconfig.auto_reconnect = false;
     iconfig.reset_seq_num_on_logon = false;
 
@@ -1471,6 +1483,7 @@ TEST_CASE("E2E: FixInitiator reconnects after acceptor restart", "[e2e][reconnec
         sc.target_comp_id = "RECONN";
         sc.heart_bt_int = 30;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager session{sc};
 
         SessionCallbacks cbs;
@@ -1498,6 +1511,7 @@ TEST_CASE("E2E: FixInitiator reconnects after acceptor restart", "[e2e][reconnec
     iconfig.target_comp_id = "ACCEPTOR";
     iconfig.heart_bt_int = 30;
     iconfig.validate_comp_ids = false;
+    iconfig.check_latency = false;
     iconfig.auto_reconnect = true;
     iconfig.reconnect_delay_ms = 200;
     iconfig.max_reconnect_attempts = 10;
@@ -1554,6 +1568,7 @@ TEST_CASE("E2E: FixInitiator reconnects after acceptor restart", "[e2e][reconnec
         sc.target_comp_id = "RECONN";
         sc.heart_bt_int = 30;
         sc.validate_comp_ids = false;
+        sc.check_latency = false;
         SessionManager session{sc};
 
         SessionCallbacks scbs;

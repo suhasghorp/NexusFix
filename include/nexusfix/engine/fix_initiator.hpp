@@ -25,6 +25,7 @@ struct InitiatorConfig {
     bool auto_reconnect{true};
     bool reset_seq_num_on_logon{false};
     bool validate_comp_ids{true};
+    bool check_latency{true};
 
     constexpr InitiatorConfig() noexcept = default;
 };
@@ -124,6 +125,7 @@ private:
         sc.heart_bt_int = config_.heart_bt_int;
         sc.reset_seq_num_on_logon = config_.reset_seq_num_on_logon;
         sc.validate_comp_ids = config_.validate_comp_ids;
+        sc.check_latency = config_.check_latency;
         return sc;
     }
 
