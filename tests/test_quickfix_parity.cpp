@@ -6,6 +6,7 @@
 // 20+ years of QuickFIX production use.
 
 #include <catch2/catch_test_macros.hpp>
+#include <ctime>
 #include <span>
 #include <string>
 #include <vector>
@@ -19,6 +20,15 @@ using namespace nfx;
 // ============================================================================
 
 namespace {
+
+inline void gmtime_safe(const std::time_t* t, std::tm* result) {
+#ifdef _MSC_VER
+    gmtime_s(result, t);
+#else
+    gmtime_r(t, result);
+#endif
+}
+
 
 class SpyStore final : public store::IMessageStore {
 public:
@@ -1017,7 +1027,7 @@ TEST_CASE("QFP-8A: SendingTime within max_latency accepted",
     auto now = std::chrono::system_clock::now();
     auto now_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
-    gmtime_r(&now_t, &tm);
+    gmtime_safe(&now_t, &tm);
     char ts_buf[64];
     std::snprintf(ts_buf, sizeof(ts_buf), "%04d%02d%02d-%02d:%02d:%02d.000",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
@@ -1081,7 +1091,7 @@ TEST_CASE("QFP-8B: SendingTime too old -> reject + logout",
     auto now = std::chrono::system_clock::now();
     auto now_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
-    gmtime_r(&now_t, &tm);
+    gmtime_safe(&now_t, &tm);
     char ts_buf[64];
     std::snprintf(ts_buf, sizeof(ts_buf), "%04d%02d%02d-%02d:%02d:%02d.000",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
