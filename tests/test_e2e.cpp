@@ -503,6 +503,7 @@ TEST_CASE("E2E: OrderCancelRequest -> cancel ack round-trip", "[e2e][regression]
             config.target_comp_id = "INITIATOR";
             config.heart_bt_int = 30;
             config.validate_comp_ids = false;
+            config.check_latency = false;
         }
 
         ~CancelAcceptor() { stop(); }
