@@ -122,8 +122,6 @@ private:
             logout_complete.store(true, std::memory_order_release);
         };
         cbs.on_app_message = [this, &session](const ParsedMessage& msg) {
-            app_message_received.store(true, std::memory_order_release);
-
             // If NOS received, respond with ExecutionReport
             if (msg.msg_type() == msg_type::NewOrderSingle) {
                 auto er_builder = fix44::ExecutionReport::Builder{}
@@ -141,6 +139,9 @@ private:
                 (void)session.send_app_message(er_builder);
                 er_sent.store(true, std::memory_order_release);
             }
+
+            // Signal LAST: waiters see all side effects (TICKET_490)
+            app_message_received.store(true, std::memory_order_release);
         };
         session.set_callbacks(std::move(cbs));
 
