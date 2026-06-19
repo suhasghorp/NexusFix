@@ -423,6 +423,7 @@ namespace fix {
     inline constexpr char EQUALS = '=';  // Tag-value separator
 
     inline constexpr std::string_view FIX_4_4 = "FIX.4.4";
+    inline constexpr std::string_view FIX_4_3 = "FIX.4.3";
     inline constexpr std::string_view FIX_4_2 = "FIX.4.2";
     inline constexpr std::string_view FIX_4_0 = "FIX.4.0";
     inline constexpr std::string_view FIXT_1_1 = "FIXT.1.1";  // FIXT 1.1 transport layer

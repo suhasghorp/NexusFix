@@ -130,6 +130,7 @@ using QuoteCondition   = Tag<276>;  // Quote condition
 using TradeCondition   = Tag<277>;  // Trade condition
 using NumberOfOrders   = Tag<346>;  // Number of orders at price level
 using TotalVolumeTraded = Tag<387>; // Total volume traded
+using Product          = Tag<460>;  // Product type (FIX 4.3+)
 
 // ============================================================================
 // Compile-time Tag Metadata (TICKET_023)
