@@ -189,7 +189,7 @@ jobs:
             xargs clang-tidy-18 -p build --warnings-as-errors='*' \
               --extra-arg=-std=c++23 \
               --extra-arg=-stdlib=libc++ \
-              --extra-arg=-Iinclude \
+              --extra-arg=-I"$(pwd)"/include \
               2>&1 | \
             tee clang-tidy-output.txt
           if grep -q 'error:' clang-tidy-output.txt; then
