@@ -11,6 +11,7 @@
 #include "nexusfix/parser/field_view.hpp"
 #include "nexusfix/parser/runtime_parser.hpp"
 #include "nexusfix/messages/common/header.hpp"
+#include "nexusfix/messages/common/trailer.hpp"
 
 namespace nfx::fixt11 {
 

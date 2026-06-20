@@ -19,6 +19,7 @@
 #include <source_location>
 #include <cstdio>
 #include <cstdlib>
+#include <type_traits>
 
 namespace nfx::util {
 

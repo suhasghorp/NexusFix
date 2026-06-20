@@ -34,6 +34,7 @@
 #include <new>
 
 #include "wait_strategy.hpp"
+#include "nexusfix/memory/buffer_pool.hpp"
 #include "nexusfix/util/compiler.hpp"
 
 #ifdef _MSC_VER
