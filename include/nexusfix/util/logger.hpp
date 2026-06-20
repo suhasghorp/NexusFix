@@ -146,6 +146,10 @@ inline void flush() {
 // No-op stubs when logging is disabled
 // ============================================================================
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
 namespace nfx::logging {
 
 enum class Level { Trace, Debug, Info, Warning, Error, Critical };

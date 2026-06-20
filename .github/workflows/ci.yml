@@ -183,10 +183,21 @@ jobs:
             -DNFX_ENABLE_LOGGING=OFF \
             -DNFX_ENABLE_ABSEIL=OFF
 
+      - name: Detect GCC toolchain for clang
+        id: gcc
+        run: |
+          GCC_VER=$(ls /usr/include/c++/ | grep -E '^[0-9]+$' | sort -n | tail -1)
+          echo "ver=${GCC_VER}" >> "$GITHUB_OUTPUT"
+
       - name: Run clang-tidy
         run: |
           find include/nexusfix -name '*.hpp' | \
-            xargs clang-tidy-18 -p build --warnings-as-errors='*' 2>&1 | \
+            xargs clang-tidy-18 -p build --warnings-as-errors='*' \
+              --extra-arg=-std=c++23 \
+              --extra-arg=-Iinclude \
+              --extra-arg=-isystem/usr/include/c++/${{ steps.gcc.outputs.ver }} \
+              --extra-arg=-isystem/usr/include/x86_64-linux-gnu/c++/${{ steps.gcc.outputs.ver }} \
+              2>&1 | \
             tee clang-tidy-output.txt
           if grep -q 'error:' clang-tidy-output.txt; then
             echo "::error::clang-tidy found violations"
