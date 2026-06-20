@@ -154,6 +154,45 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # Static analysis: clang-tidy bounds-safety checks (TICKET_491)
+  clang-tidy:
+    runs-on: ubuntu-24.04
+    name: Clang-Tidy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-tidy-18 clang-18
+
+      - name: Configure
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DNFX_BUILD_TESTS=ON \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_SIMD=OFF \
+            -DNFX_ENABLE_LOGGING=OFF \
+            -DNFX_ENABLE_ABSEIL=OFF
+
+      - name: Run clang-tidy
+        run: |
+          find include/nexusfix -name '*.hpp' | \
+            xargs clang-tidy-18 -p build --warnings-as-errors='*' 2>&1 | \
+            tee clang-tidy-output.txt
+          if grep -q 'error:' clang-tidy-output.txt; then
+            echo "::error::clang-tidy found violations"
+            exit 1
+          fi
+
   # Linux with full features (io_uring, SIMD, Abseil)
   linux-full:
     runs-on: ubuntu-24.04

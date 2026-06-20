@@ -148,7 +148,7 @@ inline void close_socket(SocketHandle socket) noexcept {
 template <typename T>
 [[nodiscard]] inline SockOptValue sockopt_ptr(const T* value) noexcept {
 #if NFX_PLATFORM_WINDOWS
-    return reinterpret_cast<const char*>(value);
+    return reinterpret_cast<const char*>(value);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 #else
     return static_cast<const void*>(value);
 #endif
@@ -158,7 +158,7 @@ template <typename T>
 template <typename T>
 [[nodiscard]] inline SockOptValueMut sockopt_ptr_mut(T* value) noexcept {
 #if NFX_PLATFORM_WINDOWS
-    return reinterpret_cast<char*>(value);
+    return reinterpret_cast<char*>(value);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 #else
     return static_cast<void*>(value);
 #endif

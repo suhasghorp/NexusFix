@@ -147,7 +147,7 @@ inline std::optional<ParsedTimestamp> parse_timestamp_simd(
     const char* buf = input.data();
 
     // Load 32 bytes from input (21 timestamp chars + padding from surrounding message)
-    __m256i raw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf));
+    __m256i raw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf));  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 
     // Step 1: Validate separator characters at positions 8('-'), 11(':'), 14(':'), 17('.')
     // Create expected separator vector: positions 8,11,14,17 have separator chars,
@@ -217,7 +217,7 @@ inline std::optional<ParsedTimestamp> parse_timestamp_simd(
     // For clean extraction, manually read from the digit vector
     // This is still fast since the validation was done in SIMD
     alignas(32) uint8_t dval[32];
-    _mm256_store_si256(reinterpret_cast<__m256i*>(dval), digits);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(dval), digits);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 
     ParsedTimestamp ts;
     ts.year   = static_cast<uint16_t>(dval[0] * 1000 + dval[1] * 100 + dval[2] * 10 + dval[3]);

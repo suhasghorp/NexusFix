@@ -1,0 +1,7 @@
+---
+Checks: >
+  -*,
+  cppcoreguidelines-pro-type-reinterpret-cast
+WarningsAsErrors: >
+  cppcoreguidelines-pro-type-reinterpret-cast
+HeaderFilterRegex: 'nexusfix/.*\.hpp$'

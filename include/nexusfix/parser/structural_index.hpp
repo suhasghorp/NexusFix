@@ -43,6 +43,7 @@
     #pragma warning(disable: 4324)
 #endif
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): SIMD structural indexing requires reinterpret_cast for vector load/store
 namespace nfx::simd {
 
 // ============================================================================
@@ -846,6 +847,7 @@ static_assert(sizeof(FIXStructuralIndex) % CACHE_LINE_SIZE == 0 ||
     "FIXStructuralIndex size should be reasonable");
 
 }  // namespace nfx::simd
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 
 #if defined(_MSC_VER)
     #pragma warning(pop)

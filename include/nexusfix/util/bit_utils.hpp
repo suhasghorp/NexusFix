@@ -258,7 +258,7 @@ template<std::unsigned_integral T>
 /// Check if pointer is aligned
 template<typename T>
 [[nodiscard]] inline bool is_pointer_aligned(const T* ptr, std::size_t alignment) noexcept {
-    return (reinterpret_cast<std::uintptr_t>(ptr) & (alignment - 1)) == 0;
+    return (reinterpret_cast<std::uintptr_t>(ptr) & (alignment - 1)) == 0;  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
 // ============================================================================

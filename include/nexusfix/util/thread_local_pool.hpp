@@ -84,7 +84,7 @@ public:
         if (!obj) return;
 
         // Calculate index from pointer
-        ptrdiff_t offset = reinterpret_cast<char*>(obj) - reinterpret_cast<char*>(&objects_[0]);
+        ptrdiff_t offset = reinterpret_cast<char*>(obj) - reinterpret_cast<char*>(&objects_[0]);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
         size_t idx = static_cast<size_t>(offset) / sizeof(T);
 
         if (idx >= Capacity) {

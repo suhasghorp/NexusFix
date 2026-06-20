@@ -20,6 +20,7 @@
 
 #include <cstdlib>
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): prefetch macros require reinterpret_cast<const char*> per intrinsic API
 namespace nfx::util {
 
 // ============================================================================
@@ -265,3 +266,4 @@ for (size_t i = 0; i < len; ++i) {
 */
 
 } // namespace nfx::util
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)

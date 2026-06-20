@@ -23,6 +23,7 @@
     #include "nexusfix/transport/winsock_init.hpp"
 #endif
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket API requires reinterpret_cast for sockaddr
 namespace nfx {
 
 // ============================================================================
@@ -472,3 +473,4 @@ private:
 };
 
 } // namespace nfx
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)

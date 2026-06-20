@@ -126,7 +126,7 @@ public:
         kern_return_t result = thread_policy_set(
             pthread_mach_thread_np(pthread_self()),
             THREAD_AFFINITY_POLICY,
-            reinterpret_cast<thread_policy_t>(&policy),
+            reinterpret_cast<thread_policy_t>(&policy),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
             THREAD_AFFINITY_POLICY_COUNT
         );
 

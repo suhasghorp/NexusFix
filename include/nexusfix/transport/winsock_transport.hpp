@@ -377,7 +377,7 @@ public:
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
 
-        if (::bind(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        if (::bind(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
             auto err = make_socket_error();
             close();
             return std::unexpected{err};
@@ -402,7 +402,7 @@ public:
         int addr_len = sizeof(client_addr);
 
         SocketHandle client_fd = ::accept(fd_,
-            reinterpret_cast<struct sockaddr*>(&client_addr),
+            reinterpret_cast<struct sockaddr*>(&client_addr),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
             &addr_len);
 
         if (!is_valid_socket(client_fd)) {

@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <concepts>
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): branchless pointer selection requires reinterpret_cast to uintptr_t
 namespace nfx::util {
 
 // ============================================================================
@@ -297,3 +298,4 @@ template<typename T>
 }
 
 } // namespace nfx::util
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)

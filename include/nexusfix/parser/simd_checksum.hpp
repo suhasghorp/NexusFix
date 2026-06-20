@@ -43,6 +43,7 @@
     #define NFX_SSE2_CHECKSUM 1
 #endif
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): SIMD intrinsics require reinterpret_cast for vector load/store
 namespace nfx::parser {
 
 // ============================================================================
@@ -370,3 +371,4 @@ private:
 }
 
 } // namespace nfx::parser
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)

@@ -8,6 +8,7 @@
 #include <new>
 #include <bit>
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): pool free-list embeds next-pointers in raw storage via reinterpret_cast
 namespace nfx {
 
 // ============================================================================
@@ -300,3 +301,4 @@ private:
 #endif
 
 } // namespace nfx
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)

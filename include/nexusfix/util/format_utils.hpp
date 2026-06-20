@@ -392,13 +392,13 @@ consteval bool validate_format_string(const char* fmt) {
 /// Format a span of chars as hex string (for debug output)
 [[nodiscard]] inline std::string format_hex(std::span<const char> data, size_t max_bytes = 32) {
     return format_hex(std::span<const std::byte>{
-        reinterpret_cast<const std::byte*>(data.data()), data.size()}, max_bytes);
+        reinterpret_cast<const std::byte*>(data.data()), data.size()}, max_bytes);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
 /// Format a span of unsigned chars as hex string (for debug output)
 [[nodiscard]] inline std::string format_hex(std::span<const unsigned char> data, size_t max_bytes = 32) {
     return format_hex(std::span<const std::byte>{
-        reinterpret_cast<const std::byte*>(data.data()), data.size()}, max_bytes);
+        reinterpret_cast<const std::byte*>(data.data()), data.size()}, max_bytes);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
 } // namespace nfx::util

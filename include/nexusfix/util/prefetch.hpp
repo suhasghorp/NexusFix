@@ -180,12 +180,12 @@ inline void prefetch_fence() noexcept {
 
 /// Check if pointer is cache-line aligned
 [[nodiscard]] inline bool is_cache_aligned(const void* ptr) noexcept {
-    return (reinterpret_cast<uintptr_t>(ptr) & (CACHE_LINE_SIZE - 1)) == 0;
+    return (reinterpret_cast<uintptr_t>(ptr) & (CACHE_LINE_SIZE - 1)) == 0;  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
 /// Get cache line offset of pointer
 [[nodiscard]] inline size_t cache_line_offset(const void* ptr) noexcept {
-    return reinterpret_cast<uintptr_t>(ptr) & (CACHE_LINE_SIZE - 1);
+    return reinterpret_cast<uintptr_t>(ptr) & (CACHE_LINE_SIZE - 1);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
 } // namespace nfx::util

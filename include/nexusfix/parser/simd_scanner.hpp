@@ -39,6 +39,7 @@
     #define NFX_AVX512_AVAILABLE 0
 #endif
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): SIMD intrinsics require reinterpret_cast for vector load/store and alignment checks
 namespace nfx::simd {
 
 // ============================================================================
@@ -926,6 +927,7 @@ static_assert(sizeof(MessageBoundary) <= CACHE_LINE_SIZE,
     "MessageBoundary should fit within a single cache line");
 
 } // namespace nfx::simd
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 
 #ifdef _MSC_VER
 #pragma warning(pop)

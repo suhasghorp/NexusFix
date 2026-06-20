@@ -30,6 +30,7 @@
 #include <type_traits>
 #include <span>
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): object pool uses reinterpret_cast for placement new on aligned storage
 namespace nfx::memory {
 
 // ============================================================================
@@ -397,3 +398,4 @@ private:
 };
 
 } // namespace nfx::memory
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
