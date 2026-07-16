@@ -4,6 +4,8 @@
 
 #include "nexusfix/sbe/codecs/execution_report.hpp"
 #include "nexusfix/sbe/codecs/new_order_single.hpp"
+#include "nexusfix/sbe/message_header.hpp"
+#include "nexusfix/sbe/types/composite_types.hpp"
 #include "nexusfix/sbe/types/sbe_types.hpp"
 
 using namespace nfx;
@@ -206,4 +208,146 @@ TEST_CASE("ExecutionReportCodec field offsets are 8-byte aligned", "[sbe][er_cod
     REQUIRE(ExecutionReportCodec::Offset::CumQty % 8 == 0);
     REQUIRE(ExecutionReportCodec::Offset::AvgPx % 8 == 0);
     REQUIRE(ExecutionReportCodec::Offset::TransactTime % 8 == 0);
+}
+
+// ============================================================================
+// isValid() compound-condition branch coverage (TICKET_497 Phase 1)
+// ============================================================================
+// Existing tests only exercise the first `||` operand (nullptr / too-small),
+// which short-circuits before the templateId/blockLength checks are ever
+// evaluated. A full-size buffer carrying the WRONG templateId or WRONG
+// blockLength drives the remaining `&&` sub-branches.
+
+TEST_CASE("NewOrderSingleCodec isValid rejects wrong templateId", "[sbe][nos_codec][regression]") {
+    alignas(8) char buffer[NewOrderSingleCodec::TOTAL_SIZE]{};
+
+    // Encode a full-size, otherwise-valid header but with the ExecutionReport
+    // templateId. Size passes; the templateId check must fail.
+    auto header = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+    header.encodeHeader(NewOrderSingleCodec::BLOCK_LENGTH,
+                        MessageHeader::TemplateId::ExecutionReport);
+
+    auto decoder = NewOrderSingleCodec::wrapForDecode(buffer, sizeof(buffer));
+    REQUIRE_FALSE(decoder.isValid());
+}
+
+TEST_CASE("NewOrderSingleCodec isValid rejects wrong blockLength", "[sbe][nos_codec][regression]") {
+    alignas(8) char buffer[NewOrderSingleCodec::TOTAL_SIZE]{};
+
+    // Correct templateId but a blockLength that does not match the codec.
+    auto header = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+    header.encodeHeader(NewOrderSingleCodec::BLOCK_LENGTH + 1,
+                        NewOrderSingleCodec::TEMPLATE_ID);
+
+    auto decoder = NewOrderSingleCodec::wrapForDecode(buffer, sizeof(buffer));
+    REQUIRE_FALSE(decoder.isValid());
+}
+
+TEST_CASE("ExecutionReportCodec isValid rejects wrong templateId", "[sbe][er_codec][regression]") {
+    alignas(8) char buffer[ExecutionReportCodec::TOTAL_SIZE]{};
+
+    auto header = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+    header.encodeHeader(ExecutionReportCodec::BLOCK_LENGTH,
+                        MessageHeader::TemplateId::NewOrderSingle);
+
+    auto decoder = ExecutionReportCodec::wrapForDecode(buffer, sizeof(buffer));
+    REQUIRE_FALSE(decoder.isValid());
+}
+
+TEST_CASE("ExecutionReportCodec isValid rejects wrong blockLength", "[sbe][er_codec][regression]") {
+    alignas(8) char buffer[ExecutionReportCodec::TOTAL_SIZE]{};
+
+    auto header = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+    header.encodeHeader(ExecutionReportCodec::BLOCK_LENGTH - 1,
+                        ExecutionReportCodec::TEMPLATE_ID);
+
+    auto decoder = ExecutionReportCodec::wrapForDecode(buffer, sizeof(buffer));
+    REQUIRE_FALSE(decoder.isValid());
+}
+
+// ============================================================================
+// MessageHeader branch coverage (TICKET_497 Phase 1)
+// ============================================================================
+
+TEST_CASE("MessageHeader validateSchema false paths", "[sbe][header][regression]") {
+    alignas(8) char buffer[MessageHeader::SIZE]{};
+
+    SECTION("wrong schemaId fails validateSchema") {
+        auto enc = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+        enc.encodeHeader(56, MessageHeader::TemplateId::NewOrderSingle);
+        // Corrupt the schemaId in place (encodeHeader always writes SCHEMA_ID).
+        write_uint16(buffer + MessageHeader::Offset::SchemaId,
+                     MessageHeader::SCHEMA_ID + 1);
+
+        auto dec = MessageHeader::wrapForDecode(buffer, sizeof(buffer));
+        REQUIRE_FALSE(dec.validateSchema());
+    }
+
+    SECTION("wrong version fails validateSchema") {
+        auto enc = MessageHeader::wrapForEncode(buffer, sizeof(buffer));
+        enc.encodeHeader(56, MessageHeader::TemplateId::NewOrderSingle);
+        write_uint16(buffer + MessageHeader::Offset::Version,
+                     MessageHeader::SCHEMA_VERSION + 1);
+
+        auto dec = MessageHeader::wrapForDecode(buffer, sizeof(buffer));
+        REQUIRE_FALSE(dec.validateSchema());
+    }
+}
+
+TEST_CASE("MessageHeader bodyLength ternary branches", "[sbe][header][regression]") {
+    alignas(8) char buffer[64]{};
+
+    SECTION("length greater than SIZE returns remainder") {
+        auto dec = MessageHeader::wrapForDecode(buffer, 40);
+        REQUIRE(dec.bodyLength() == 40 - MessageHeader::SIZE);
+    }
+
+    SECTION("length equal to SIZE returns zero") {
+        auto dec = MessageHeader::wrapForDecode(buffer, MessageHeader::SIZE);
+        REQUIRE(dec.bodyLength() == 0);
+    }
+
+    SECTION("length less than SIZE returns zero") {
+        auto dec = MessageHeader::wrapForDecode(buffer, MessageHeader::SIZE - 2);
+        REQUIRE(dec.bodyLength() == 0);
+    }
+}
+
+TEST_CASE("MessageHeader isValid nullptr branch", "[sbe][header][regression]") {
+    auto dec = MessageHeader::wrapForDecode(nullptr, 64);
+    REQUIRE_FALSE(dec.isValid());
+}
+
+// ============================================================================
+// FixedString decode padding-strip branch coverage (TICKET_497 Phase 1)
+// ============================================================================
+
+TEST_CASE("FixedString decode padding-strip loop branches", "[sbe][fixedstr][regression]") {
+    SECTION("all padding decodes to empty (loop runs to zero)") {
+        char buf[8];
+        FixedString8::clear(buf);  // all spaces
+        REQUIRE(FixedString8::decode(buf).empty());
+    }
+
+    SECTION("no trailing padding keeps full length (loop does not run)") {
+        char buf[8]{'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'};
+        REQUIRE(FixedString8::decode(buf) == "ABCDEFGH");
+    }
+
+    SECTION("partial padding strips only the tail") {
+        char buf[8]{'I', 'B', 'M', ' ', ' ', ' ', ' ', ' '};
+        REQUIRE(FixedString8::decode(buf) == "IBM");
+    }
+}
+
+TEST_CASE("FixedString is_null loop early-exit branch", "[sbe][fixedstr][regression]") {
+    SECTION("mixed null and space is null (all-blank)") {
+        char buf[8]{'\0', ' ', '\0', ' ', ' ', '\0', ' ', ' '};
+        REQUIRE(FixedString8::is_null(buf));
+    }
+
+    SECTION("any real character makes it non-null (early exit)") {
+        char buf[8]{' ', ' ', ' ', 'X', ' ', ' ', ' ', ' '};
+        REQUIRE_FALSE(FixedString8::is_null(buf));
+    }
 }

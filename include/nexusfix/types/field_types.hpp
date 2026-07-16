@@ -146,7 +146,13 @@ struct FixedPrice {
                     ++fractional_digits;
                 }
             } else {
-                integer_part = integer_part * 10 + (c - '0');
+                int64_t digit = c - '0';
+                // Stop before signed-overflow UB on untrusted input. The
+                // pre-scale guard keeps integer_part * SCALE in range too.
+                if (integer_part > (std::numeric_limits<int64_t>::max() / SCALE - digit) / 10) [[unlikely]] {
+                    break;
+                }
+                integer_part = integer_part * 10 + digit;
             }
         }
 
@@ -233,7 +239,13 @@ struct Qty {
                     ++fractional_digits;
                 }
             } else {
-                integer_part = integer_part * 10 + (c - '0');
+                int64_t digit = c - '0';
+                // Stop before signed-overflow UB on untrusted input. The
+                // pre-scale guard keeps integer_part * SCALE in range too.
+                if (integer_part > (std::numeric_limits<int64_t>::max() / SCALE - digit) / 10) [[unlikely]] {
+                    break;
+                }
+                integer_part = integer_part * 10 + digit;
             }
         }
 

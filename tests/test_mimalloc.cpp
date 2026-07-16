@@ -4,10 +4,16 @@
 #include "nexusfix/memory/buffer_pool.hpp"
 #include "nexusfix/store/memory_message_store.hpp"
 
+#include "support/failing_resource.hpp"
+
 #include <vector>
 #include <string>
 #include <memory_resource>
 #include <cstring>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <array>
 
 using namespace nfx::memory;
 using namespace nfx;
@@ -420,4 +426,143 @@ TEST_CASE("SessionHeap as MemoryMessageStore upstream", "[mimalloc][session]") {
     // Reset store
     store.reset();
     REQUIRE(store.message_count() == 0);
+}
+
+// ============================================================================
+// OOM Fault Injection (TICKET_497 Phase 2 second-pass)
+// ============================================================================
+//
+// The Phase 2 first-pass note deferred the SessionHeap/mimalloc OOM loop here,
+// behind NFX_HAS_MIMALLOC. mimalloc's do_allocate returns nullptr (never throws)
+// when the request cannot be satisfied, so the OOM contract for these resources
+// is "nullptr, stats untouched, resource still usable" rather than a bad_alloc.
+// The store-over-SessionHeap loop reuses the SQLite-style Nth-allocation injector
+// through a FailingResource interposed in front of the session heap.
+
+TEST_CASE("MimallocMemoryResource impossible allocation returns null cleanly",
+          "[mimalloc][resource][oom]") {
+    MimallocMemoryResource resource;
+    REQUIRE(resource.valid());
+
+    // Warm the heap so there is real state that must survive a failed request.
+    auto alloc = resource.allocator();
+    char* live = alloc.allocate(256);
+    REQUIRE(live != nullptr);
+    const auto s_before = resource.stats();
+
+    // An allocation mimalloc cannot satisfy. do_allocate forwards nullptr and,
+    // crucially, does NOT bump the stats (the [[likely]] ptr guard). No throw.
+    void* huge = resource.allocate(std::numeric_limits<std::size_t>::max() / 2, 64);
+    REQUIRE(huge == nullptr);
+
+    const auto s_after = resource.stats();
+    REQUIRE(s_after.bytes_allocated == s_before.bytes_allocated);
+    REQUIRE(s_after.allocation_count == s_before.allocation_count);
+
+    // Heap is still usable after the failed request.
+    char* more = alloc.allocate(128);
+    REQUIRE(more != nullptr);
+    std::memset(more, 0x5A, 128);
+    REQUIRE(static_cast<unsigned char>(more[0]) == 0x5A);
+
+    alloc.deallocate(more, 128);
+    alloc.deallocate(live, 256);
+    REQUIRE(resource.allocation_count() == 0);
+}
+
+TEST_CASE("SessionHeap-shaped pool propagates upstream OOM without corruption",
+          "[mimalloc][session][oom]") {
+    using nfx::test::FailingResource;
+
+    // SessionHeap is a monotonic_buffer_resource bumping from an initial buffer,
+    // overflowing to a PMR upstream. mimalloc's own do_allocate returns nullptr
+    // rather than throwing, and requesting an impossible size crashes the
+    // monotonic front's next-buffer sizing (a libstdc++ detail, not our path).
+    // So exercise the real, in-contract failure: the overflow upstream throwing
+    // bad_alloc on a fresh chunk. Reproduce SessionHeap's exact composition with
+    // the counting injector as the upstream and confirm the pool propagates the
+    // failure (bump allocations before overflow stay valid, no corruption).
+    constexpr std::size_t INITIAL = 4096;
+    alignas(64) std::array<char, INITIAL> buffer{};
+
+    FailingResource failing;
+    std::pmr::monotonic_buffer_resource pool(buffer.data(), buffer.size(), &failing);
+
+    // Bump allocations within the initial buffer never touch upstream.
+    auto* p1 = static_cast<char*>(pool.allocate(1024, 8));
+    auto* p2 = static_cast<char*>(pool.allocate(1024, 8));
+    REQUIRE(p1 != nullptr);
+    REQUIRE(p2 != nullptr);
+    std::memset(p1, 0x11, 1024);
+    std::memset(p2, 0x22, 1024);
+    REQUIRE(failing.allocation_count() == 0);  // still inside the initial buffer
+
+    // Arm the very next upstream chunk request to fail, then force overflow. The
+    // monotonic resource asks upstream for a fresh block; the injected bad_alloc
+    // must surface here, not corrupt the pool.
+    failing.fail_after(1);
+    bool threw = false;
+    try {
+        // Large enough to exhaust the remaining initial buffer and require a new
+        // upstream chunk.
+        (void)pool.allocate(8192, 8);
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    REQUIRE(threw);
+    REQUIRE(failing.triggered());
+
+    // Earlier bump allocations are untouched by the failed overflow.
+    REQUIRE(static_cast<unsigned char>(p1[0]) == 0x11);
+    REQUIRE(static_cast<unsigned char>(p2[1023]) == 0x22);
+
+    // Pool is usable again once injection is disabled.
+    failing.disable();
+    auto* p3 = static_cast<char*>(pool.allocate(8192, 8));
+    REQUIRE(p3 != nullptr);
+    std::memset(p3, 0x33, 8192);
+    REQUIRE(static_cast<unsigned char>(p3[8191]) == 0x33);
+}
+
+TEST_CASE("Store over injected SessionHeap upstream survives OOM loop",
+          "[mimalloc][session][store][oom]") {
+    using nfx::test::FailingResource;
+
+    // Structure mirrors SessionHeap (monotonic pool + PMR upstream), but the
+    // upstream is the counting injector so we can force the Nth chunk allocation
+    // to fail deterministically. The store's bad_alloc catch must convert that to
+    // a false return, never a throw or a leak.
+    constexpr char MSG[] =
+        "8=FIX.4.4\x01" "9=20\x01" "35=D\x01" "49=S\x01" "56=T\x01" "34=1\x01" "10=000\x01";
+    std::span<const char> msg_span(MSG, sizeof(MSG) - 1);
+
+    for (std::size_t n = 1; n <= 8; ++n) {
+        FailingResource failing;
+        failing.fail_after(n);
+
+        nfx::store::MemoryMessageStore::Config cfg{
+            .session_id = "MIMALLOC-OOM",
+            .pool_size_bytes = 0,             // force every alloc through upstream
+            .upstream_resource = &failing
+        };
+        nfx::store::MemoryMessageStore store(cfg);
+
+        bool saw_failure = false;
+        for (uint32_t seq = 1; seq <= 64; ++seq) {
+            if (!store.store(seq, msg_span)) {  // must never throw
+                saw_failure = true;
+                break;
+            }
+        }
+
+        if (failing.triggered()) {
+            REQUIRE(saw_failure);
+            REQUIRE(store.stats().store_failures >= 1);
+        }
+
+        // Usable after the failure; destroying the store frees every live alloc.
+        failing.disable();
+        REQUIRE(store.store(9999, msg_span));
+        REQUIRE(store.contains(9999));
+    }
 }

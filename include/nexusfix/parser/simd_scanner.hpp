@@ -218,9 +218,11 @@ inline size_t find_soh_xsimd(
         ++i;
     }
 
-    // SIMD loop with aligned loads
-    const size_t simd_end = data.size() & ~(width - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop with aligned loads. Bound on i + width <= size, not
+    // size & ~(width-1): the alignment prologue shifts i forward, so the naive
+    // bound lets an aligned chunk read past the end of an unpadded buffer whose
+    // length is not a multiple of width (same OOB class as find_equals_xsimd).
+    while (i + width <= data.size()) [[likely]] {
         auto chunk = xsimd::load_aligned<Arch>(ptr + i);
         auto cmp = (chunk == soh_vec);
         uint64_t mask = cmp.mask();
@@ -262,9 +264,12 @@ inline size_t find_equals_xsimd(
         ++i;
     }
 
-    // SIMD loop with aligned loads
-    const size_t simd_end = data.size() & ~(width - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop with aligned loads. The bound must be i + width <= size, not
+    // size & ~(width-1): the alignment prologue above shifts i forward by up to
+    // width-1 bytes, so a chunk starting at i < (size & ~(width-1)) can still
+    // read past the end. On an unpadded buffer whose size is not a multiple of
+    // width, that is a genuine out-of-bounds read (found by fuzzing).
+    while (i + width <= data.size()) [[likely]] {
         auto chunk = xsimd::load_aligned<Arch>(ptr + i);
         auto cmp = (chunk == eq_vec);
         uint64_t mask = cmp.mask();
@@ -445,9 +450,10 @@ inline size_t find_soh_avx2(
         ++i;
     }
 
-    // SIMD loop with alignment hint for compiler optimization
-    const size_t simd_end = data.size() & ~(AVX2_REGISTER_SIZE - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop with alignment hint. Bound on i + width <= size: the alignment
+    // prologue shifts i forward, so size & ~(width-1) would let an aligned load
+    // read past the end of an unpadded buffer (OOB found by fuzzing).
+    while (i + AVX2_REGISTER_SIZE <= data.size()) [[likely]] {
         // Hint to compiler that pointer is 32-byte aligned
         const char* aligned_ptr = std::assume_aligned<AVX2_REGISTER_SIZE>(ptr + i);
         __m256i chunk = _mm256_load_si256(
@@ -488,9 +494,10 @@ inline size_t find_equals_avx2(
         ++i;
     }
 
-    // SIMD loop with alignment hint for compiler optimization
-    const size_t simd_end = data.size() & ~(AVX2_REGISTER_SIZE - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop with alignment hint. Bound on i + width <= size: the alignment
+    // prologue shifts i forward, so size & ~(width-1) would let an aligned load
+    // read past the end of an unpadded buffer (OOB found by fuzzing).
+    while (i + AVX2_REGISTER_SIZE <= data.size()) [[likely]] {
         // Hint to compiler that pointer is 32-byte aligned
         const char* aligned_ptr = std::assume_aligned<AVX2_REGISTER_SIZE>(ptr + i);
         __m256i chunk = _mm256_load_si256(
@@ -601,9 +608,10 @@ inline size_t find_soh_avx512(
         ++i;
     }
 
-    // SIMD loop (64 bytes per iteration) with alignment hint
-    const size_t simd_end = data.size() & ~(AVX512_REGISTER_SIZE - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop (64 bytes per iteration). Bound on i + width <= size: the
+    // alignment prologue shifts i forward, so size & ~(width-1) would let an
+    // aligned load read past the end of an unpadded buffer (OOB found by fuzzing).
+    while (i + AVX512_REGISTER_SIZE <= data.size()) [[likely]] {
         // Hint to compiler that pointer is 64-byte aligned
         const char* aligned_ptr = std::assume_aligned<AVX512_REGISTER_SIZE>(ptr + i);
         __m512i chunk = _mm512_load_si512(
@@ -643,9 +651,10 @@ inline size_t find_equals_avx512(
         ++i;
     }
 
-    // SIMD loop with alignment hint
-    const size_t simd_end = data.size() & ~(AVX512_REGISTER_SIZE - 1);
-    while (i < simd_end) [[likely]] {
+    // SIMD loop. Bound on i + width <= size: the alignment prologue shifts i
+    // forward, so size & ~(width-1) would let an aligned load read past the end
+    // of an unpadded buffer (OOB found by fuzzing).
+    while (i + AVX512_REGISTER_SIZE <= data.size()) [[likely]] {
         // Hint to compiler that pointer is 64-byte aligned
         const char* aligned_ptr = std::assume_aligned<AVX512_REGISTER_SIZE>(ptr + i);
         __m512i chunk = _mm512_load_si512(

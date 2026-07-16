@@ -28,6 +28,7 @@
 #include <string_view>
 #include <span>
 #include <cstdint>
+#include <limits>
 
 namespace nfx::util {
 
@@ -290,7 +291,10 @@ public:
             for (auto i = 0uz; i < eq_pos; ++i) {
                 char c = data_[i];
                 if (c < '0' || c > '9') return {0, {}};
-                tag = tag * 10 + (c - '0');
+                int digit = c - '0';
+                // Reject overflow on untrusted input instead of signed-overflow UB.
+                if (tag > (std::numeric_limits<int>::max() - digit) / 10) return {0, {}};
+                tag = tag * 10 + digit;
             }
 
             auto soh_pos = data_.find('\x01', eq_pos + 1);

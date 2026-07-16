@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <functional>
 
 #include "nexusfix/session/state.hpp"
 #include "nexusfix/session/sequence.hpp"
@@ -1785,4 +1786,237 @@ TEST_CASE("IMessageStore polymorphic access", "[session][store][regression]") {
         REQUIRE(store->get_next_sender_seq_num() == 5);
         // Destructor runs via unique_ptr - should not leak
     }
+}
+
+// ============================================================================
+// TICKET_497 Phase 1: on_data_received validation error branches.
+// These exercise the reject / early-return paths in on_data_received and the
+// admin handlers that the happy-path integration tests above do not reach.
+// ============================================================================
+
+namespace {
+
+/// Build an admin message with an arbitrary set of extra header/body fields.
+/// The first field written after the standard header decides MsgType.
+std::string build_admin_with_fields(
+    char type,
+    std::string_view sender, std::string_view target, uint32_t seq_num,
+    const std::function<void(MessageAssembler&)>& add_fields) {
+    MessageAssembler asm_;
+    auto& b = asm_.start()
+        .field(tag::MsgType::value, std::string_view{&type, 1})
+        .field(tag::SenderCompID::value, sender)
+        .field(tag::TargetCompID::value, target)
+        .field(tag::MsgSeqNum::value, static_cast<int64_t>(seq_num))
+        .field(tag::SendingTime::value, "20260401-12:00:00.000");
+    add_fields(b);
+    auto msg = b.finish();
+    return std::string(msg.data(), msg.size());
+}
+
+}  // anonymous namespace
+
+TEST_CASE("Session rejects PossDupFlag=Y without OrigSendingTime",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+    size_t sent_before = ts.sent_messages.size();
+
+    // Heartbeat (35=0) with PossDupFlag=Y (tag 43) but no OrigSendingTime (122).
+    auto bad = build_admin_with_fields(
+        msg_type::Heartbeat, "TARGET", "SENDER", 2,
+        [](MessageAssembler& b) { b.field(tag::PossDupFlag::value, 'Y'); });
+    ts.session.on_data_received(std::span<const char>{bad.data(), bad.size()});
+
+    // A Reject (35=3) must have been sent for the missing required tag.
+    REQUIRE(ts.sent_messages.size() > sent_before);
+    REQUIRE(ts.last_sent().find("35=3") != std::string::npos);
+    REQUIRE(ts.session.stats().rejects_sent >= 1);
+}
+
+TEST_CASE("Session rejects on CompID mismatch",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+
+    bool error_fired = false;
+    SessionCallbacks cbs;
+    cbs.on_send = [&](std::span<const char> d) -> bool {
+        ts.sent_messages.emplace_back(d.begin(), d.end());
+        return true;
+    };
+    cbs.on_error = [&](SessionError) { error_fired = true; };
+    ts.session.set_callbacks(std::move(cbs));
+
+    // Message from an unexpected counterparty (wrong SenderCompID).
+    auto hb = build_heartbeat("WRONG", "SENDER", 2);
+    ts.session.on_data_received(std::span<const char>{hb.data(), hb.size()});
+
+    // Reject (35=3) followed by logout-and-disconnect.
+    REQUIRE(ts.last_sent().find("35=5") != std::string::npos);  // logout is last
+    REQUIRE(error_fired);
+    REQUIRE(ts.session.state() != SessionState::Active);
+}
+
+TEST_CASE("Session TooLow sequence without PossDup fires sequence error",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+
+    // Advance expected inbound past 2 by delivering seq 2 (a heartbeat).
+    auto hb2 = build_heartbeat("TARGET", "SENDER", 2);
+    ts.session.on_data_received(std::span<const char>{hb2.data(), hb2.size()});
+
+    SessionError captured{};
+    bool fired = false;
+    SessionCallbacks cbs;
+    cbs.on_send = [&](std::span<const char> d) -> bool {
+        ts.sent_messages.emplace_back(d.begin(), d.end());
+        return true;
+    };
+    cbs.on_error = [&](SessionError e) { captured = e; fired = true; };
+    ts.session.set_callbacks(std::move(cbs));
+
+    // Now deliver a too-low seq (2 again) WITHOUT PossDupFlag.
+    auto hb_low = build_heartbeat("TARGET", "SENDER", 2);
+    ts.session.on_data_received(std::span<const char>{hb_low.data(), hb_low.size()});
+
+    REQUIRE(fired);
+    REQUIRE(captured.code == SessionErrorCode::SequenceGap);
+}
+
+TEST_CASE("Session SequenceReset gap-fill with NewSeqNo too low is rejected",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+
+    // Push expected_inbound to 5 by receiving seq 2,3,4.
+    for (uint32_t s = 2; s <= 4; ++s) {
+        auto hb = build_heartbeat("TARGET", "SENDER", s);
+        ts.session.on_data_received(std::span<const char>{hb.data(), hb.size()});
+    }
+    REQUIRE(ts.session.sequences().expected_inbound() == 5);
+    size_t sent_before = ts.sent_messages.size();
+
+    // SequenceReset (35=4) at seq 5: in-sequence, so validate_inbound advances
+    // expected_inbound to 6 before handle_sequence_reset runs. NewSeqNo=3 is then
+    // below expected (6) and GapFillFlag=Y, hitting the too-low reject branch.
+    auto reset = build_admin_with_fields(
+        msg_type::SequenceReset, "TARGET", "SENDER", 5,
+        [](MessageAssembler& b) {
+            b.field(tag::GapFillFlag::value, 'Y')
+             .field(tag::NewSeqNo::value, static_cast<int64_t>(3));
+        });
+    ts.session.on_data_received(std::span<const char>{reset.data(), reset.size()});
+
+    // Reject (35=3) for the too-low NewSeqNo; set_inbound branch was skipped.
+    REQUIRE(ts.sent_messages.size() > sent_before);
+    REQUIRE(ts.last_sent().find("35=3") != std::string::npos);
+    REQUIRE(ts.session.sequences().expected_inbound() == 6);
+}
+
+TEST_CASE("Session SequenceReset gap-fill advances inbound when valid",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.sequences().expected_inbound() == 2);
+
+    // Valid gap-fill: NewSeqNo=10 (>= expected 2). Reaches set_inbound branch.
+    auto reset = build_admin_with_fields(
+        msg_type::SequenceReset, "TARGET", "SENDER", 2,
+        [](MessageAssembler& b) {
+            b.field(tag::GapFillFlag::value, 'Y')
+             .field(tag::NewSeqNo::value, static_cast<int64_t>(10));
+        });
+    ts.session.on_data_received(std::span<const char>{reset.data(), reset.size()});
+
+    REQUIRE(ts.session.sequences().expected_inbound() == 10);
+}
+
+TEST_CASE("Session ResendRequest missing EndSeqNo returns silently",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+    size_t sent_before = ts.sent_messages.size();
+
+    // ResendRequest (35=2) with BeginSeqNo (7) but no EndSeqNo (16).
+    auto req = build_admin_with_fields(
+        msg_type::ResendRequest, "TARGET", "SENDER", 2,
+        [](MessageAssembler& b) {
+            b.field(7, static_cast<int64_t>(1));  // BeginSeqNo only
+        });
+    ts.session.on_data_received(std::span<const char>{req.data(), req.size()});
+
+    // handle_resend_request early-returns: no response emitted.
+    REQUIRE(ts.sent_messages.size() == sent_before);
+}
+
+TEST_CASE("Session Reject message invokes on_error callback",
+          "[session][error][regression]") {
+    TestSession ts;
+    ts.establish();
+    REQUIRE(ts.session.state() == SessionState::Active);
+
+    bool error_fired = false;
+    SessionError captured{};
+    SessionCallbacks cbs;
+    cbs.on_send = [&](std::span<const char> d) -> bool {
+        ts.sent_messages.emplace_back(d.begin(), d.end());
+        return true;
+    };
+    cbs.on_error = [&](SessionError e) { error_fired = true; captured = e; };
+    ts.session.set_callbacks(std::move(cbs));
+
+    // Counterparty sends a session-level Reject (35=3) as the next in-sequence msg.
+    auto reject = build_admin_with_fields(
+        msg_type::Reject, "TARGET", "SENDER", 2,
+        [](MessageAssembler& b) {
+            b.field(tag::Text::value, "your message was bad");
+        });
+    ts.session.on_data_received(std::span<const char>{reject.data(), reject.size()});
+
+    REQUIRE(error_fired);
+    REQUIRE(captured.code == SessionErrorCode::InvalidState);
+}
+
+TEST_CASE("Session initiate_logon resets sequences when configured",
+          "[session][error][regression]") {
+    SessionConfig config{};
+    config.sender_comp_id = "SENDER";
+    config.target_comp_id = "TARGET";
+    config.reset_seq_num_on_logon = true;
+
+    SessionManager session(config);
+
+    // Store carries non-initial sequences. With reset_seq_num_on_logon=true the
+    // reset branch must win over the store-restore branch (they are if/else-if),
+    // so the high store values are discarded rather than restored.
+    store::NullMessageStore store("RESET-ON-LOGON");
+    store.set_next_sender_seq_num(50);
+    store.set_next_target_seq_num(60);
+    session.set_message_store(&store);
+
+    std::vector<std::vector<char>> sent;
+    SessionCallbacks cbs;
+    cbs.on_send = [&sent](std::span<const char> d) -> bool {
+        sent.emplace_back(d.begin(), d.end());
+        return true;
+    };
+    session.set_callbacks(std::move(cbs));
+
+    session.on_connect();
+    auto result = session.initiate_logon();
+    REQUIRE(result.has_value());
+
+    // reset ran: inbound is back to INITIAL (1), NOT the store's 60.
+    REQUIRE(session.sequences().expected_inbound() == SequenceManager::INITIAL_SEQ_NUM);
+    // Logon carried seq 1 (reset), not 50 from the store.
+    REQUIRE(!sent.empty());
+    std::string logon(sent[0].begin(), sent[0].end());
+    REQUIRE(logon.find("34=1") != std::string::npos);
 }

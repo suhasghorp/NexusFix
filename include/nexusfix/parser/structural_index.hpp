@@ -20,6 +20,7 @@
 #include <string_view>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 
 #include "nexusfix/platform/platform.hpp"
@@ -192,7 +193,10 @@ struct alignas(CACHE_LINE_SIZE) FIXStructuralIndex {
         for (uint16_t i = bounds[0]; i < bounds[1]; ++i) {
             char c = msg[i];
             if (c < '0' || c > '9') [[unlikely]] return 0;
-            tag = tag * 10 + (c - '0');
+            int digit = c - '0';
+            // Reject overflow on untrusted input instead of signed-overflow UB.
+            if (tag > (std::numeric_limits<int>::max() - digit) / 10) [[unlikely]] return 0;
+            tag = tag * 10 + digit;
         }
         return tag;
     }
@@ -234,8 +238,14 @@ inline FIXStructuralIndex build_index_scalar(std::span<const char> data) noexcep
     const char* ptr = data.data();
     const size_t len = data.size();
 
+    // The loop is bounded by soh_count, but equals_count climbs independently:
+    // adversarial input with far more '=' than SOH (e.g. 266 '=' and 1 SOH) can
+    // drive equals_count past MAX_FIELDS while soh_count stays low, overflowing
+    // equals_positions. Guard the '=' write itself so it never exceeds the array;
+    // a legitimate 256-field message still records all 256 '=' and 256 SOH.
     for (size_t i = 0; i < len && idx.soh_count < MAX_FIELDS; ++i) {
         if (ptr[i] == fix::EQUALS) [[unlikely]] {
+            if (idx.equals_count >= MAX_FIELDS) [[unlikely]] continue;
             idx.equals_positions[idx.equals_count++] = static_cast<uint16_t>(i);
 
             // Check for important tags (1-2 digit tags only for speed)
@@ -331,10 +341,14 @@ inline FIXStructuralIndex build_index_xsimd(std::span<const char> data) noexcept
                           idx.equals_count, MAX_FIELDS);
     }
 
-    // Handle remaining bytes with scalar code (resume from where SIMD stopped)
+    // Handle remaining bytes with scalar code (resume from where SIMD stopped).
+    // Guard the '=' write so '='-heavy input cannot overflow equals_positions in
+    // this tail (same bug as the pure scalar builder), while a legitimate
+    // 256-field message still records all its fields.
     const char* cptr = data.data();
     for (size_t i = simd_pos; i < data.size() && idx.soh_count < MAX_FIELDS; ++i) {
         if (cptr[i] == fix::EQUALS) [[unlikely]] {
+            if (idx.equals_count >= MAX_FIELDS) [[unlikely]] continue;
             idx.equals_positions[idx.equals_count++] = static_cast<uint16_t>(i);
         }
         else if (cptr[i] == fix::SOH) [[unlikely]] {
@@ -460,9 +474,13 @@ inline FIXStructuralIndex build_index_avx2(std::span<const char> data) noexcept 
                                idx.equals_count, MAX_FIELDS);
     }
 
-    // Handle remaining bytes with scalar code (resume from where SIMD stopped)
+    // Handle remaining bytes with scalar code (resume from where SIMD stopped).
+    // Guard the '=' write so '='-heavy input cannot overflow equals_positions in
+    // this tail (same bug as the pure scalar builder), while a legitimate
+    // 256-field message still records all its fields.
     for (size_t i = simd_pos; i < data.size() && idx.soh_count < MAX_FIELDS; ++i) {
         if (ptr[i] == fix::EQUALS) [[unlikely]] {
+            if (idx.equals_count >= MAX_FIELDS) [[unlikely]] continue;
             idx.equals_positions[idx.equals_count++] = static_cast<uint16_t>(i);
         }
         else if (ptr[i] == fix::SOH) [[unlikely]] {
@@ -566,9 +584,13 @@ inline FIXStructuralIndex build_index_avx512(std::span<const char> data) noexcep
                                  idx.equals_count, MAX_FIELDS);
     }
 
-    // Handle remaining bytes with scalar code (resume from where SIMD stopped)
+    // Handle remaining bytes with scalar code (resume from where SIMD stopped).
+    // Guard the '=' write so '='-heavy input cannot overflow equals_positions in
+    // this tail (same bug as the pure scalar builder), while a legitimate
+    // 256-field message still records all its fields.
     for (size_t i = simd_pos; i < data.size() && idx.soh_count < MAX_FIELDS; ++i) {
         if (ptr[i] == fix::EQUALS) [[unlikely]] {
+            if (idx.equals_count >= MAX_FIELDS) [[unlikely]] continue;
             idx.equals_positions[idx.equals_count++] = static_cast<uint16_t>(i);
         }
         else if (ptr[i] == fix::SOH) [[unlikely]] {
@@ -803,7 +825,11 @@ public:
         for (; i < v.size(); ++i) {
             char c = v[i];
             if (c < '0' || c > '9') break;
-            result = result * 10 + (c - '0');
+            int digit = c - '0';
+            // Stop before signed-overflow UB on untrusted input; the accumulated
+            // value so far is returned rather than wrapping.
+            if (result > (std::numeric_limits<int64_t>::max() - digit) / 10) [[unlikely]] break;
+            result = result * 10 + digit;
         }
 
         return negative ? -result : result;

@@ -8,6 +8,7 @@
 #include "nexusfix/memory/mpsc_queue.hpp"
 #include "nexusfix/interfaces/i_message.hpp"
 #include "nexusfix/serializer/constexpr_serializer.hpp"
+#include "nexusfix/types/field_types.hpp"
 
 #include <random>
 #include <thread>
@@ -303,6 +304,79 @@ TEST_CASE("Property: MessageFactory produces valid checksums",
                 static_cast<uint32_t>(i + 1), "20240101-00:00:00.000", id);
             REQUIRE(verify_checksum(msg));
         }
+    }
+}
+
+// ============================================================================
+// Property: Serialize -> Parse Round-Trip Preserves Header Fields
+// ============================================================================
+
+TEST_CASE("Property: random admin messages round-trip through the parser",
+          "[property][serializer][parser][regression]") {
+
+    // TICKET_497 Phase 4: generate random-but-valid admin messages, serialize
+    // with MessageFactory, parse back, and assert every header field the two
+    // peers depend on survives the wire round-trip. The PRNG seed is fixed and
+    // logged so any failure reproduces exactly.
+
+    constexpr unsigned SEED = 20240716u;
+    std::mt19937 rng(SEED);
+    INFO("PRNG seed: " << SEED);
+
+    std::uniform_int_distribution<uint32_t> seq_dist(1, nfx::SeqNum::MAX_VALUE);
+    std::uniform_int_distribution<int> kind_dist(0, 3);  // hb / logon / testreq / logout
+    std::uniform_int_distribution<uint32_t> hb_dist(1, 3600);
+    std::uniform_int_distribution<int> idlen_dist(1, 32);
+
+    auto random_id = [&](const char* prefix) {
+        std::string s = prefix;
+        int n = idlen_dist(rng);
+        for (int i = 0; i < n; ++i) {
+            s += static_cast<char>('A' + (rng() % 26));
+        }
+        return s;
+    };
+
+    for (int trial = 0; trial < 500; ++trial) {
+        // Randomize the identity too, not just the sequence number, so CompID
+        // comparison actually exercises varying content.
+        std::string sender = random_id("S");
+        std::string target = random_id("T");
+        nfx::serializer::MessageFactory<8192> factory("FIX.4.4", sender, target);
+
+        uint32_t seq = seq_dist(rng);
+        const char* sending_time = "20240716-12:34:56.789";
+
+        std::span<const char> wire;
+        char expected_type = '0';
+
+        switch (kind_dist(rng)) {
+            case 0:
+                wire = factory.build_heartbeat(seq, sending_time);
+                expected_type = '0';
+                break;
+            case 1:
+                wire = factory.build_logon(seq, sending_time, hb_dist(rng));
+                expected_type = 'A';
+                break;
+            case 2: {
+                std::string id = random_id("TR");
+                wire = factory.build_test_request(seq, sending_time, id);
+                expected_type = '1';
+                break;
+            }
+            default:
+                wire = factory.build_logout(seq, sending_time);
+                expected_type = '5';
+                break;
+        }
+
+        auto parsed = nfx::ParsedMessage::parse(wire);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->msg_type() == expected_type);
+        CHECK(parsed->msg_seq_num() == seq);
+        CHECK(parsed->sender_comp_id() == sender);
+        CHECK(parsed->target_comp_id() == target);
     }
 }
 

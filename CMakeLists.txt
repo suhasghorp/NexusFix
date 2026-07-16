@@ -17,6 +17,7 @@ option(NFX_ENABLE_MIMALLOC "Enable mimalloc allocator for per-session heaps" OFF
 option(NFX_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(NFX_BUILD_TESTS "Build tests" ON)
 option(NFX_BUILD_EXAMPLES "Build examples" ON)
+option(NFX_BUILD_FUZZERS "Build libFuzzer harnesses (Clang only, TICKET_497 Phase 3)" OFF)
 option(NFX_ENABLE_COVERAGE "Enable coverage instrumentation for CI/local test analysis only; not for production or benchmarks" OFF)
 
 # Dependencies via FetchContent
@@ -274,6 +275,11 @@ endif()
 # Examples
 if(NFX_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# Fuzz harnesses (Clang + libFuzzer only, off by default)
+if(NFX_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()
 
 # Install targets (only when no FetchContent dependencies are linked)

@@ -871,6 +871,76 @@ TEST_CASE("PaddedMessageBuffer overflow sets truncated flag", "[parser][simd][st
 }
 
 // ============================================================================
+// FIXStructuralIndex edge-case branches (TICKET_497 Phase 1)
+// ============================================================================
+// valid() is a four-operand short-circuit; existing tests only hit the all-true
+// path. Each false operand and every out-of-range accessor guard is driven here.
+
+TEST_CASE("FIXStructuralIndex valid() false operands", "[parser][simd][structural][regression]") {
+    SECTION("empty input has zero soh/equals -> not valid") {
+        auto idx = simd::build_index_scalar(std::span<const char>{});
+        REQUIRE_FALSE(idx.valid());
+        REQUIRE(idx.field_count() == 0);
+    }
+
+    SECTION("fields without any '=' -> equals_count zero -> not valid") {
+        // Two SOH-terminated runs but no '=' separators.
+        static constexpr char raw[] = "ABC\x01" "DEF\x01";
+        auto idx = simd::build_index_scalar(
+            std::span<const char>{raw, sizeof(raw) - 1});
+        REQUIRE(idx.equals_count == 0);
+        REQUIRE_FALSE(idx.valid());
+    }
+
+    SECTION("more '=' than SOH -> counts differ -> not valid") {
+        // One SOH but two '=' -> soh_count != equals_count.
+        static constexpr char raw[] = "8=a=b\x01";
+        auto idx = simd::build_index_scalar(
+            std::span<const char>{raw, sizeof(raw) - 1});
+        REQUIRE(idx.soh_count != idx.equals_count);
+        REQUIRE_FALSE(idx.valid());
+    }
+}
+
+TEST_CASE("FIXStructuralIndex out-of-range accessors", "[parser][simd][structural][regression]") {
+    auto idx = simd::build_index_scalar(
+        std::span<const char>{EXEC_REPORT.data(), EXEC_REPORT.size()});
+    std::span<const char> msg{EXEC_REPORT.data(), EXEC_REPORT.size()};
+
+    SECTION("field_bounds past field_count returns zeros") {
+        auto bounds = idx.field_bounds(idx.field_count());
+        REQUIRE(bounds[0] == 0);
+        REQUIRE(bounds[1] == 0);
+        REQUIRE(bounds[2] == 0);
+        REQUIRE(bounds[3] == 0);
+    }
+
+    SECTION("tag_at past field_count returns 0") {
+        REQUIRE(idx.tag_at(msg, idx.field_count()) == 0);
+    }
+
+    SECTION("value_at past field_count returns empty") {
+        REQUIRE(idx.value_at(msg, idx.field_count()).empty());
+    }
+
+    SECTION("find_tag returns field_count when tag absent") {
+        REQUIRE(idx.find_tag(msg, 9999) == idx.field_count());
+    }
+}
+
+TEST_CASE("FIXStructuralIndex tag_at rejects non-digit tag", "[parser][simd][structural][regression]") {
+    // A field whose "tag" contains a letter must parse to 0 (non-digit branch).
+    static constexpr char raw[] = "8=FIX.4.4\x01" "3X=D\x01" "55=AAPL\x01";
+    auto idx = simd::build_index_scalar(
+        std::span<const char>{raw, sizeof(raw) - 1});
+    std::span<const char> msg{raw, sizeof(raw) - 1};
+
+    // Field 0 (tag 8) parses fine; field 1 has "3X" which hits the non-digit guard.
+    REQUIRE(idx.tag_at(msg, 0) == 8);
+    REQUIRE(idx.tag_at(msg, 1) == 0);
+}
+
+// ============================================================================
 // SIMD Checksum Tests
 // ============================================================================
 

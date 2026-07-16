@@ -73,7 +73,12 @@ struct FieldView {
         for (; i < value.size(); ++i) [[likely]] {
             char c = value[i];
             if (c < '0' || c > '9') [[unlikely]] return std::nullopt;
-            result = result * 10 + (c - '0');
+            int digit = c - '0';
+            // Reject overflow on untrusted input instead of signed-overflow UB.
+            if (result > (std::numeric_limits<int64_t>::max() - digit) / 10) [[unlikely]] {
+                return std::nullopt;
+            }
+            result = result * 10 + digit;
         }
 
         return negative ? -result : result;
@@ -87,7 +92,13 @@ struct FieldView {
         uint64_t result = 0;
         for (char c : value) [[likely]] {
             if (c < '0' || c > '9') [[unlikely]] return std::nullopt;
-            result = result * 10 + (c - '0');
+            uint64_t digit = static_cast<uint64_t>(c - '0');
+            // Reject overflow on untrusted input (unsigned wrap is defined but
+            // still a silent-wrong-value bug for a field parser).
+            if (result > (std::numeric_limits<uint64_t>::max() - digit) / 10) [[unlikely]] {
+                return std::nullopt;
+            }
+            result = result * 10 + digit;
         }
         return result;
     }
@@ -189,7 +200,13 @@ public:
                 last_error_ = ParseErrorCode::InvalidTagNumber;
                 return FieldView{};  // Invalid tag
             }
-            tag = tag * 10 + (c - '0');
+            int digit = c - '0';
+            // Reject overflow on untrusted input instead of signed-overflow UB.
+            if (tag > (std::numeric_limits<int>::max() - digit) / 10) [[unlikely]] {
+                last_error_ = ParseErrorCode::InvalidTagNumber;
+                return FieldView{};  // Tag number too large
+            }
+            tag = tag * 10 + digit;
             ++pos_;
         }
 

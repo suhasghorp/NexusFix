@@ -41,6 +41,10 @@ add_executable(nexusfix_tests
     test_logger.cpp
     test_version_compat.cpp
     test_fix44_builders.cpp
+    test_message_error_paths.cpp
+    test_fault_injection.cpp
+    test_fuzz_regressions.cpp
+    test_boundary_sweep.cpp
     test_performance_gate.cpp
     test_platform.cpp
     test_quickfix_parity.cpp
@@ -50,6 +54,9 @@ target_link_libraries(nexusfix_tests PRIVATE
     nexusfix
     Catch2::Catch2WithMain
 )
+
+# tests/support/ headers (fault injection etc.) are included as "support/<hdr>"
+target_include_directories(nexusfix_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(MSVC)
     target_compile_options(nexusfix_tests PRIVATE /W4)
@@ -95,6 +102,8 @@ set_target_properties(nexusfix_tests platform_test
 if(NFX_ENABLE_MIMALLOC)
     add_executable(mimalloc_tests test_mimalloc.cpp)
     target_link_libraries(mimalloc_tests PRIVATE nexusfix Catch2::Catch2WithMain)
+    # tests/support/ headers (failing_resource.hpp) are included as "support/<hdr>"
+    target_include_directories(mimalloc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     if(NOT MSVC)
         # Suppress Abseil __int128 pedantic warnings when Abseil is also enabled
         target_compile_options(mimalloc_tests PRIVATE

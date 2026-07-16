@@ -9,6 +9,7 @@
 
 #include <span>
 #include <cstdint>
+#include <limits>
 
 #include "nexusfix/platform/platform.hpp"
 #include "nexusfix/types/tag.hpp"
@@ -93,7 +94,13 @@ public:
                     return std::unexpected{ParseError{
                         ParseErrorCode::InvalidTagNumber, 0, j}};
                 }
-                tag = tag * 10 + (c - '0');
+                int digit = c - '0';
+                // Reject overflow on untrusted input instead of signed-overflow UB.
+                if (tag > (std::numeric_limits<int>::max() - digit) / 10) [[unlikely]] {
+                    return std::unexpected{ParseError{
+                        ParseErrorCode::InvalidTagNumber, 0, j}};
+                }
+                tag = tag * 10 + digit;
             }
 
             // Reject if field count exceeds capacity
@@ -110,6 +117,15 @@ public:
                 tag,
                 std::span<const char>{ptr + value_start, value_len}
             };
+
+            // CheckSum (10) is the terminal FIX field. Anything after it is a
+            // new message or trailing garbage, not part of this one. Stopping
+            // here keeps the recorded field set consistent with the checksum
+            // boundary and makes parse idempotent (re-emitting the recorded
+            // fields and reparsing yields the same message).
+            if (tag == tag::CheckSum::value) [[unlikely]] {
+                break;
+            }
 
             field_start = field_end + 1;  // Skip SOH
         }
@@ -398,6 +414,12 @@ public:
             ParseError err = parser.field_table_.set(field.tag, field.value, allow_dup);
             if (err.code != ParseErrorCode::None) [[unlikely]] {
                 return std::unexpected{err};
+            }
+
+            // CheckSum (10) terminates the message; stop before indexing any
+            // trailing bytes (see ParsedMessage::parse for the rationale).
+            if (field.tag == tag::CheckSum::value) [[unlikely]] {
+                break;
             }
         }
 

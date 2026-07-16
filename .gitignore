@@ -4,6 +4,14 @@ build-*/
 cmake-build-*/
 out/
 
+# libFuzzer crash/leak artifacts (TICKET_497 Phase 3); confirmed crashes are
+# minimized and checked in under fuzz/corpus/<harness>/regressions/ instead.
+crash-*
+leak-*
+timeout-*
+oom-*
+fuzz-corpus-cache/
+
 # IDE files
 .idea/
 .vscode/

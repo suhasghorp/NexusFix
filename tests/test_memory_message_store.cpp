@@ -239,6 +239,76 @@ TEST_CASE("MemoryMessageStore capacity boundary", "[store][regression]") {
         auto s = store.stats();
         REQUIRE(s.store_failures == 1);
     }
+
+    // TICKET_497 Phase 1: byte-limit branch of the capacity check
+    // (message-count limit is exercised above; the OR'd byte-limit is not).
+    SECTION("Evicts on byte-limit with evict_oldest=true") {
+        MemoryMessageStore::Config cfg;
+        cfg.session_id = "BYTE_EVICT";
+        cfg.max_messages = 1000;   // count is not the binding limit
+        cfg.max_bytes = 12;        // binding limit: two 5-byte msgs fit, third evicts
+        cfg.evict_oldest = true;
+        MemoryMessageStore store(cfg);
+
+        auto msg = make_msg("55555");  // 5 bytes each
+        REQUIRE(store.store(1, msg));
+        REQUIRE(store.store(2, msg));  // 10 bytes, still under 12
+        REQUIRE(store.message_count() == 2);
+
+        // 3rd would push to 15 > 12: evicts oldest (seq 1), stays at 2 messages
+        REQUIRE(store.store(3, msg));
+        REQUIRE(store.message_count() == 2);
+        REQUIRE_FALSE(store.contains(1));
+        REQUIRE(store.contains(3));
+        REQUIRE(store.bytes_used() == 10);
+    }
+
+    SECTION("Rejects on byte-limit with evict_oldest=false") {
+        MemoryMessageStore::Config cfg;
+        cfg.session_id = "BYTE_REJECT";
+        cfg.max_messages = 1000;
+        cfg.max_bytes = 8;
+        cfg.evict_oldest = false;
+        MemoryMessageStore store(cfg);
+
+        auto msg = make_msg("55555");  // 5 bytes
+        REQUIRE(store.store(1, msg));
+        // 2nd would push to 10 > 8: rejected, message and bytes unchanged
+        REQUIRE_FALSE(store.store(2, msg));
+        REQUIRE(store.message_count() == 1);
+        REQUIRE(store.bytes_used() == 5);
+        REQUIRE(store.stats().store_failures == 1);
+    }
+
+    // Exercises evict_oldest_locked()'s "find new minimum" scan (the loop
+    // over remaining messages), reached only when >1 message survives eviction.
+    SECTION("Eviction recomputes min_seq over remaining messages") {
+        MemoryMessageStore::Config cfg;
+        cfg.session_id = "MIN_RECOMPUTE";
+        cfg.max_messages = 3;
+        cfg.evict_oldest = true;
+        MemoryMessageStore store(cfg);
+
+        auto msg = make_msg("x");
+        // Store out of order so min_seq is not the first inserted.
+        REQUIRE(store.store(10, msg));
+        REQUIRE(store.store(5, msg));   // min_seq = 5
+        REQUIRE(store.store(20, msg));
+        REQUIRE(store.message_count() == 3);
+
+        // 4th evicts min (seq 5); loop must recompute min_seq = 10 over {10,20}.
+        REQUIRE(store.store(30, msg));
+        REQUIRE(store.message_count() == 3);
+        REQUIRE_FALSE(store.contains(5));
+        REQUIRE(store.contains(10));
+
+        // 5th evicts new min (seq 10); recompute again over {20,30}.
+        REQUIRE(store.store(40, msg));
+        REQUIRE_FALSE(store.contains(10));
+        REQUIRE(store.contains(20));
+        REQUIRE(store.contains(30));
+        REQUIRE(store.contains(40));
+    }
 }
 
 // ============================================================================

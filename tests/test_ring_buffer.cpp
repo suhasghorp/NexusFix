@@ -165,3 +165,96 @@ TEST_CASE("RingBuffer: skip advances head without copying", "[transport][ring_bu
     REQUIRE(read == 9);
     CHECK(std::string_view(out.data(), read) == "keep_this");
 }
+
+// ============================================================================
+// TICKET_497 Phase 1: wraparound / boundary branches of read_span, write_span,
+// skip and commit_write that the happy-path tests above do not reach.
+// ============================================================================
+
+TEST_CASE("RingBuffer: read_span wrap branch returns only first segment",
+          "[transport][ring_buffer][regression]") {
+    RingBuffer<8> buf;
+
+    // Advance head past 0 so a later write wraps the tail behind it.
+    std::array<char, 6> pre{};
+    std::memset(pre.data(), 'X', pre.size());
+    REQUIRE(buf.write({pre.data(), pre.size()}) == 6);
+    std::array<char, 6> drop{};
+    REQUIRE(buf.read({drop.data(), drop.size()}) == 6);  // head = 6
+
+    // Write 4 bytes: occupies indices 6,7 then wraps to 0,1 (start=6 > end=2).
+    const char data[] = "WXYZ";
+    REQUIRE(buf.write({data, 4}) == 4);
+    CHECK(buf.size() == 4);
+
+    // read_span hits the `else if (size() > 0)` wrap branch: first segment only,
+    // from start (6) to end of buffer (Size 8) = 2 bytes.
+    auto span = buf.read_span();
+    REQUIRE(span.size() == 2);
+    CHECK(span[0] == 'W');
+    CHECK(span[1] == 'X');
+}
+
+TEST_CASE("RingBuffer: read_span on empty buffer returns empty span",
+          "[transport][ring_buffer][regression]") {
+    RingBuffer<8> buf;
+    // start == end and size() == 0: falls through both branches to `return {}`.
+    auto span = buf.read_span();
+    CHECK(span.size() == 0);
+}
+
+TEST_CASE("RingBuffer: write_span wrap branch caps at buffer end",
+          "[transport][ring_buffer][regression]") {
+    RingBuffer<8> buf;
+
+    // Move tail to index 6, then free space at the front so avail wraps.
+    std::array<char, 6> pre{};
+    std::memset(pre.data(), 'A', pre.size());
+    REQUIRE(buf.write({pre.data(), pre.size()}) == 6);  // tail = 6
+    std::array<char, 4> drop{};
+    REQUIRE(buf.read({drop.data(), drop.size()}) == 4);  // head = 4, size = 2
+
+    // available() == 6, but tail index is 6, so end(6)+avail(6) > Size(8):
+    // write_span returns only the tail-to-end segment (Size - end = 2 bytes).
+    auto ws = buf.write_span();
+    REQUIRE(ws.size() == 2);
+}
+
+TEST_CASE("RingBuffer: commit_write caps at available space",
+          "[transport][ring_buffer][regression]") {
+    RingBuffer<8> buf;
+
+    // Request to commit more than available: commit_write clamps via std::min.
+    (void)buf.write_span();
+    buf.commit_write(100);
+    CHECK(buf.size() == 8);   // clamped to capacity, never overflows
+    CHECK(buf.full());
+}
+
+TEST_CASE("RingBuffer: skip past available clamps to size",
+          "[transport][ring_buffer][regression]") {
+    RingBuffer<64> buf;
+
+    const char data[] = "short";
+    REQUIRE(buf.write({data, 5}) == 5);
+
+    // Skip more than present: head advances by std::min(count, available).
+    buf.skip(100);
+    CHECK(buf.size() == 0);
+    CHECK(buf.empty());
+}
+
+// ============================================================================
+// connection_state_name runtime lookup (socket.hpp) including out-of-range.
+// ============================================================================
+
+TEST_CASE("connection_state_name runtime lookup", "[transport][socket][regression]") {
+    CHECK(connection_state_name(ConnectionState::Disconnected) == "Disconnected");
+    CHECK(connection_state_name(ConnectionState::Connecting) == "Connecting");
+    CHECK(connection_state_name(ConnectionState::Connected) == "Connected");
+    CHECK(connection_state_name(ConnectionState::Disconnecting) == "Disconnecting");
+    CHECK(connection_state_name(ConnectionState::Error) == "Error");
+
+    // Out-of-range enum value takes the `return "Unknown"` fallthrough branch.
+    CHECK(connection_state_name(static_cast<ConnectionState>(200)) == "Unknown");
+}

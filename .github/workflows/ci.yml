@@ -5,6 +5,10 @@ on:
     branches: [main, develop, 'feature/**']
   pull_request:
     branches: [main, develop]
+  schedule:
+    # Nightly extended fuzz run (03:17 UTC). Odd minute avoids the top-of-hour
+    # scheduling pileup on GitHub's side.
+    - cron: '17 3 * * *'
 
 jobs:
   build:
@@ -108,7 +112,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build lcov
 
-      - name: Configure with coverage
+      # Two configurations are captured and merged so SIMD and logging branches
+      # appear in the report. ubuntu-24.04 runners are AVX2-capable, so the
+      # SIMD-ON config exercises simd_scanner / structural_index AVX2 paths.
+      # AVX-512 branches are runner-dependent and excluded from the gate when
+      # unavailable (they simply stay uncovered in the merged tracefile).
+      - name: Configure (SIMD OFF, logging OFF)
         env:
           CC: gcc-14
           CXX: g++-14
@@ -123,26 +132,78 @@ jobs:
             -DNFX_ENABLE_ABSEIL=OFF \
             -DNFX_ENABLE_COVERAGE=ON
 
-      - name: Build
+      - name: Build (SIMD OFF)
         run: cmake --build build
 
-      - name: Test
+      - name: Test (SIMD OFF)
         run: ctest --test-dir build --output-on-failure
 
-      - name: Generate coverage report
+      - name: Capture branch + line coverage (SIMD OFF)
         run: |
-          lcov --capture --directory build --output-file coverage.info \
-            --gcov-tool gcov-14 --ignore-errors mismatch
-          lcov --remove coverage.info \
-            '/usr/*' \
-            '*/tests/*' \
-            '*/build/*' \
-            '*/benchmarks/*' \
-            '*/examples/*' \
-            '*/_deps/*' \
-            --ignore-errors unused \
-            --output-file coverage.info
-          lcov --list coverage.info
+          lcov --capture --directory build --output-file cov-simd-off.info \
+            --rc branch_coverage=1 --gcov-tool gcov-14 \
+            --ignore-errors mismatch
+          lcov --remove cov-simd-off.info \
+            '/usr/*' '*/tests/*' '*/build/*' '*/benchmarks/*' \
+            '*/examples/*' '*/_deps/*' \
+            --rc branch_coverage=1 --ignore-errors unused \
+            --output-file cov-simd-off.info
+
+      - name: Configure (SIMD ON, logging ON)
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -B build-simd -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNFX_BUILD_TESTS=ON \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_SIMD=ON \
+            -DNFX_ENABLE_LOGGING=ON \
+            -DNFX_ENABLE_ABSEIL=OFF \
+            -DNFX_ENABLE_COVERAGE=ON
+
+      - name: Build (SIMD ON)
+        run: cmake --build build-simd
+
+      - name: Test (SIMD ON)
+        run: ctest --test-dir build-simd --output-on-failure
+
+      - name: Capture branch + line coverage (SIMD ON)
+        run: |
+          lcov --capture --directory build-simd --output-file cov-simd-on.info \
+            --rc branch_coverage=1 --gcov-tool gcov-14 \
+            --ignore-errors mismatch
+          lcov --remove cov-simd-on.info \
+            '/usr/*' '*/tests/*' '*/build/*' '*/build-simd/*' '*/benchmarks/*' \
+            '*/examples/*' '*/_deps/*' \
+            --rc branch_coverage=1 --ignore-errors unused \
+            --output-file cov-simd-on.info
+
+      - name: Merge tracefiles
+        run: |
+          lcov --add-tracefile cov-simd-off.info \
+               --add-tracefile cov-simd-on.info \
+               --rc branch_coverage=1 --ignore-errors unused \
+               --output-file coverage.info
+          lcov --list coverage.info --rc branch_coverage=1
+          # lcov 2.0 --list omits the branch column; --summary reports it.
+          lcov --summary coverage.info --rc branch_coverage=1
+
+      - name: Generate HTML branch report
+        run: |
+          genhtml --branch-coverage \
+            --output-directory coverage-html \
+            --ignore-errors source,category \
+            coverage.info
+
+      - name: Upload HTML coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-branch
+          path: coverage-html
+          retention-days: 14
 
       - name: Upload to Codecov
         if: env.CODECOV_TOKEN != ''
@@ -151,8 +212,22 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           file: coverage.info
-          fail_ci_if_error: false
+          # Hard gate: a broken upload now fails the job instead of passing
+          # silently. The no-token skip above keeps forks (which never get the
+          # secret) green.
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+      # Hard lcov branch-coverage gate, independent of Codecov availability.
+      # Parses `lcov --summary` in-job and fails if overall branch coverage or
+      # any per-module floor drops below the Phase 1/Phase 5 anchor (measured
+      # 2026-07-16, achieved-minus-2%). Floors, not the exact achieved number,
+      # so run-to-run template-instantiation jitter in branch totals cannot flake
+      # the gate red. sbe/ is floored at its GCC-artifact ceiling (~53%; 169 of
+      # its uncovered branches are compiler-instrumented memcpy/memset dispatch
+      # that no source-level test can flip, see TICKET_497 Phase 1 notes).
+      - name: Branch-coverage gate (lcov)
+        run: scripts/coverage_gate.sh coverage.info
 
   # Static analysis: clang-tidy bounds-safety checks (TICKET_491)
   clang-tidy:
@@ -233,3 +308,214 @@ jobs:
 
       - name: Performance Regression Check
         run: ./scripts/check_perf_regression.sh 10000
+
+  # Sanitizers (TICKET_497 Phase 5): run the full test suite under ASan+UBSan
+  # with SIMD ON. Closes config-matrix gap #1 (the main suite, including the
+  # Phase 2 fault-injection and Phase 4 boundary suites, never ran under a
+  # sanitizer in CI). Debug build so assertion bodies are live; leak detection on.
+  sanitizers:
+    runs-on: ubuntu-24.04
+    name: Sanitizers (ASan+UBSan)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure
+        env:
+          CC: gcc-14
+          CXX: g++-14
+          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+          CXXFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNFX_BUILD_TESTS=ON \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_SIMD=ON \
+            -DNFX_ENABLE_LOGGING=ON \
+            -DNFX_ENABLE_ABSEIL=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (ASan+UBSan, leak detection on)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  # mimalloc (TICKET_497 Phase 5): normal build with NFX_ENABLE_MIMALLOC=ON so
+  # the SessionHeap path and its Phase 2 OOM loop (test_mimalloc.cpp,
+  # NFX_HAS_MIMALLOC guard) run in CI. Closes config-matrix gap #2. Not a
+  # sanitized job by design: mimalloc's allocator collides with the ASan
+  # interceptor, so its honest CI home is a plain build.
+  mimalloc:
+    runs-on: ubuntu-24.04
+    name: mimalloc SessionHeap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNFX_BUILD_TESTS=ON \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_SIMD=ON \
+            -DNFX_ENABLE_MIMALLOC=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Fuzzing smoke (TICKET_497 Phase 3): build the libFuzzer harnesses and run a
+  # short bounded pass over the seed corpus on every PR/push. A crash fails CI
+  # and the crashing input is uploaded for triage. Clang + libFuzzer only; the
+  # harnesses link libstdc++ because the packaged libFuzzer runtime uses its ABI.
+  fuzz-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    name: Fuzz Smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18 libstdc++-14-dev
+
+      - name: Configure
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          cmake -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNFX_BUILD_FUZZERS=ON \
+            -DNFX_BUILD_TESTS=OFF \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_LOGGING=OFF \
+            -DNFX_ENABLE_ABSEIL=OFF \
+            -DNFX_ENABLE_SIMD=ON \
+            -DNFX_ENABLE_XSIMD=ON \
+            -DNFX_FUZZ_SMOKE_SECONDS=60
+
+      - name: Build harnesses
+        run: cmake --build build-fuzz
+
+      - name: Smoke run (60s per harness)
+        run: |
+          set -e
+          for h in fuzz_structural_index fuzz_runtime_parser \
+                   fuzz_session_input fuzz_serializer_roundtrip; do
+            echo "== smoke: $h =="
+            ./build-fuzz/fuzz/$h \
+              -max_total_time=60 -print_final_stats=1 \
+              "fuzz/corpus/$h"
+          done
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Nightly extended fuzz: longer run per harness with corpus caching so coverage
+  # accumulates across runs. Keyed on the seed-corpus hash so a corpus change
+  # starts a fresh cache line rather than reusing a stale one.
+  fuzz-nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    name: Fuzz Nightly
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18 libstdc++-14-dev
+
+      - name: Hash seed corpus
+        id: corpus
+        run: echo "hash=${{ hashFiles('fuzz/corpus/**') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore accumulated corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz-corpus-cache
+          key: fuzz-corpus-${{ steps.corpus.outputs.hash }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Configure
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          cmake -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNFX_BUILD_FUZZERS=ON \
+            -DNFX_BUILD_TESTS=OFF \
+            -DNFX_BUILD_BENCHMARKS=OFF \
+            -DNFX_BUILD_EXAMPLES=OFF \
+            -DNFX_ENABLE_LOGGING=OFF \
+            -DNFX_ENABLE_ABSEIL=OFF \
+            -DNFX_ENABLE_SIMD=ON \
+            -DNFX_ENABLE_XSIMD=ON
+
+      - name: Build harnesses
+        run: cmake --build build-fuzz
+
+      - name: Extended run (600s per harness)
+        run: |
+          set -e
+          for h in fuzz_structural_index fuzz_runtime_parser \
+                   fuzz_session_input fuzz_serializer_roundtrip; do
+            mkdir -p "fuzz-corpus-cache/$h"
+            echo "== nightly: $h =="
+            ./build-fuzz/fuzz/$h \
+              -max_total_time=600 -print_final_stats=1 \
+              "fuzz-corpus-cache/$h" "fuzz/corpus/$h"
+          done
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nightly-crashes
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
+          retention-days: 30
