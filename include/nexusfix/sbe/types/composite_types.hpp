@@ -30,7 +30,7 @@ public:
         const char* NFX_RESTRICT buffer) noexcept {
         // Find last non-space character
         std::size_t len = N;
-        while (len > 0 && buffer[len - 1] == PADDING_CHAR) {
+        while (len > 0 && buffer[len - 1] == PADDING_CHAR) { // LCOV_EXCL_BR_LINE: GCC inlines N-specialised loop as memcpy/memset size-dispatch; 169 artifact branch pairs across call sites, no source-level test can flip them (TICKET_497 Phase 1 finding, TICKET_497_3 WS1)
             --len;
         }
         return std::string_view{buffer, len};
@@ -42,10 +42,10 @@ public:
         char* NFX_RESTRICT buffer, std::string_view value) noexcept {
         const bool truncated = value.size() > N;
         const std::size_t copy_len = truncated ? N : value.size();
-        std::memcpy(buffer, value.data(), copy_len);
+        std::memcpy(buffer, value.data(), copy_len); // LCOV_EXCL_BR_LINE: GCC-instrumented inlined memcpy dispatch; artifact branch pairs at each call site, not closeable by tests (TICKET_497 Phase 1, TICKET_497_3 WS1)
         // Pad remaining bytes with spaces
         if (copy_len < N) {
-            std::memset(buffer + copy_len, PADDING_CHAR, N - copy_len);
+            std::memset(buffer + copy_len, PADDING_CHAR, N - copy_len); // LCOV_EXCL_BR_LINE: GCC-instrumented inlined memset dispatch; artifact branch pairs at each call site, not closeable by tests (TICKET_497 Phase 1, TICKET_497_3 WS1)
         }
         return !truncated;
     }

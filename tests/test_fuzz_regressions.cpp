@@ -13,6 +13,7 @@
 #include "nexusfix/parser/structural_index.hpp"
 #include "nexusfix/parser/simd_scanner.hpp"
 #include "nexusfix/parser/runtime_parser.hpp"
+#include "nexusfix/types/field_types.hpp"
 
 #include <span>
 #include <string>
@@ -32,9 +33,10 @@
 
 TEST_CASE("Fuzz regression: '='-heavy input does not overflow equals_positions",
           "[fuzz][regression][parser]") {
-    // MAX_FIELDS is 256; use comfortably more '=' than that, with a single SOH
-    // so soh_count stays low and never trips the old (soh-only) loop bound.
-    std::string input(300, '=');
+    // The structural index caps at nfx::simd::MAX_FIELDS; use comfortably more
+    // '=' than that, with a single SOH so soh_count stays low and never trips
+    // the old (soh-only) loop bound.
+    std::string input(nfx::simd::MAX_FIELDS + 44, '=');
     input.push_back('\x01');
 
     std::span<const char> bytes{input.data(), input.size()};
@@ -42,8 +44,8 @@ TEST_CASE("Fuzz regression: '='-heavy input does not overflow equals_positions",
     // Must not read/write out of bounds (validated under ASan). The recorded
     // equals_count must be clamped to the array capacity.
     const auto idx = nfx::simd::build_index_scalar(bytes);
-    REQUIRE(idx.equals_count <= 256);
-    REQUIRE(idx.soh_count <= 256);
+    REQUIRE(idx.equals_count <= nfx::simd::MAX_FIELDS);
+    REQUIRE(idx.soh_count <= nfx::simd::MAX_FIELDS);
 
     // Walking every recorded field stays in bounds.
     for (std::size_t i = 0; i < idx.field_count(); ++i) {
@@ -60,12 +62,12 @@ TEST_CASE("Fuzz regression: '='-heavy input via runtime dispatch (SIMD tail)",
           "[fuzz][regression][parser]") {
     // Force through build_index() so the SIMD tail loop (which had the same
     // equals_count bug) is exercised when SIMD is compiled in.
-    std::string input(400, '=');
+    std::string input(nfx::simd::MAX_FIELDS + 144, '=');
     input.push_back('\x01');
     std::span<const char> bytes{input.data(), input.size()};
 
     const auto idx = nfx::simd::build_index(bytes);
-    REQUIRE(idx.equals_count <= 256);
+    REQUIRE(idx.equals_count <= nfx::simd::MAX_FIELDS);
 }
 
 // ============================================================================
@@ -155,6 +157,51 @@ TEST_CASE("Fuzz regression: overlong integer field value does not overflow",
     nfx::FieldView g{34, std::span<const char>{ok.data(), ok.size()}};
     REQUIRE(g.as_int() == 12345);
     REQUIRE(g.as_uint() == 12345u);
+}
+
+// ============================================================================
+// Bug 5: signed-integer-overflow UB in FixedPrice/Qty::from_string combine
+// ============================================================================
+//
+// The integer-part digit guard only kept integer_part * SCALE <= INT64_MAX. The
+// final `integer_part * SCALE + fractional_part` combine then added up to
+// (SCALE - 1) on top, which still overflows for a value whose integer part is
+// near INT64_MAX / SCALE and whose fraction is full. Under
+// -fsanitize=signed-integer-overflow this aborts:
+//
+//   FixedPrice::from_string("92233720368.99999999")  // 99999999 + 9223372036800000000
+//   Qty::from_string("922337203685477.9999")         // same structure
+//
+// Fix: reserve (SCALE - 1) of headroom in the per-digit guard so the combine
+// can never overflow. The guard is what stops accumulation, so the parsed value
+// is truncated (LOW-3) rather than wrapped; the point of the test is that the
+// combine is well-defined for the worst-case fraction.
+
+TEST_CASE("Fuzz regression: FixedPrice::from_string combine does not overflow",
+          "[fuzz][regression][types]") {
+    // Integer part at the old guard's ceiling (INT64_MAX / 1e8 == 92233720368)
+    // with a full 8-digit fraction. Must not overflow (UBSan proves it) and the
+    // result must stay a valid int64 raw value.
+    const auto p = nfx::FixedPrice::from_string("92233720368.99999999");
+    REQUIRE(p.raw <= std::numeric_limits<int64_t>::max());
+    REQUIRE(p.raw >= 0);
+
+    // A representable price still round-trips exactly.
+    const auto ok = nfx::FixedPrice::from_string("123.45");
+    REQUIRE(ok.raw == 12345000000LL);
+}
+
+TEST_CASE("Fuzz regression: Qty::from_string combine does not overflow",
+          "[fuzz][regression][types]") {
+    // Integer part at the old guard's ceiling (INT64_MAX / 1e4) with a full
+    // 4-digit fraction.
+    const auto q = nfx::Qty::from_string("922337203685477.9999");
+    REQUIRE(q.raw <= std::numeric_limits<int64_t>::max());
+    REQUIRE(q.raw >= 0);
+
+    // A representable quantity still round-trips exactly.
+    const auto ok = nfx::Qty::from_string("100.5");
+    REQUIRE(ok.raw == 1005000LL);
 }
 
 // ============================================================================

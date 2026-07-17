@@ -48,6 +48,7 @@ add_executable(nexusfix_tests
     test_performance_gate.cpp
     test_platform.cpp
     test_quickfix_parity.cpp
+    test_coroutine.cpp
 )
 
 target_link_libraries(nexusfix_tests PRIVATE

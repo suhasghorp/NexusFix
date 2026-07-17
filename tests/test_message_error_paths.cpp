@@ -18,8 +18,11 @@
 #include "nexusfix/messages/fix43/execution_report.hpp"
 #include "nexusfix/messages/fix43/new_order_single.hpp"
 #include "nexusfix/messages/fix44/execution_report.hpp"
+#include "nexusfix/messages/fix44/heartbeat.hpp"
+#include "nexusfix/messages/fix44/market_data.hpp"
 #include "nexusfix/messages/fix44/new_order_single.hpp"
 #include "nexusfix/messages/fix50/execution_report.hpp"
+#include "nexusfix/messages/fixt11/session.hpp"
 #include "nexusfix/messages/fix50/new_order_single.hpp"
 #include "nexusfix/parser/runtime_parser.hpp"
 #include "nexusfix/types/error.hpp"
@@ -462,4 +465,185 @@ TEST_CASE("ExecutionReport convenience predicate sub-branches", "[messages][exec
         REQUIRE(r->is_rejected());
         REQUIRE_FALSE(r->is_fill());
     }
+}
+
+// ============================================================================
+// WS4: fix44::Heartbeat missing-field and invalid type branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("FIX44 Heartbeat from_buffer happy path and TestReqID branch", "[messages][fix44][heartbeat][regression]") {
+    SECTION("without TestReqID") {
+        MessageAssembler asm_;
+        asm_.start(fix::FIX_4_4);
+        emit_header(asm_, fix44::Heartbeat::MSG_TYPE);
+        auto raw = asm_.finish();
+        auto r = fix44::Heartbeat::from_buffer(raw);
+        REQUIRE(r.has_value());
+        REQUIRE(r->test_req_id.empty());
+    }
+
+    SECTION("with TestReqID") {
+        MessageAssembler asm_;
+        asm_.start(fix::FIX_4_4);
+        emit_header(asm_, fix44::Heartbeat::MSG_TYPE);
+        asm_.field(tag::TestReqID::value, "PING1");
+        auto raw = asm_.finish();
+        auto r = fix44::Heartbeat::from_buffer(raw);
+        REQUIRE(r.has_value());
+        REQUIRE(r->test_req_id == "PING1");
+    }
+
+    SECTION("wrong MsgType") {
+        MessageAssembler asm_;
+        asm_.start(fix::FIX_4_4);
+        emit_header(asm_, 'D');  // NewOrderSingle, not heartbeat
+        auto raw = asm_.finish();
+        auto r = fix44::Heartbeat::from_buffer(raw);
+        REQUIRE_FALSE(r.has_value());
+        REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+    }
+}
+
+TEST_CASE("FIX44 TestRequest from_buffer missing TestReqID", "[messages][fix44][heartbeat][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, fix44::TestRequest::MSG_TYPE);
+    // No TestReqID field
+    auto raw = asm_.finish();
+    auto r = fix44::TestRequest::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::MissingRequiredField);
+}
+
+TEST_CASE("FIX44 TestRequest from_buffer with TestReqID", "[messages][fix44][heartbeat][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, fix44::TestRequest::MSG_TYPE);
+    asm_.field(tag::TestReqID::value, "TEST1");
+    auto raw = asm_.finish();
+    auto r = fix44::TestRequest::from_buffer(raw);
+    REQUIRE(r.has_value());
+    REQUIRE(r->test_req_id == "TEST1");
+}
+
+// ============================================================================
+// WS4: fix44::MarketDataRequest branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("FIX44 MarketDataSnapshotFullRefresh from_buffer missing Symbol", "[messages][fix44][market_data][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, fix44::MarketDataSnapshotFullRefresh::MSG_TYPE);
+    // No Symbol field
+    auto raw = asm_.finish();
+    auto r = fix44::MarketDataSnapshotFullRefresh::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::MissingRequiredField);
+    REQUIRE(r.error().tag == tag::Symbol::value);
+}
+
+TEST_CASE("FIX44 MarketDataSnapshotFullRefresh from_buffer wrong MsgType", "[messages][fix44][market_data][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, 'D');
+    auto raw = asm_.finish();
+    auto r = fix44::MarketDataSnapshotFullRefresh::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIX44 MarketDataIncrementalRefresh from_buffer wrong MsgType", "[messages][fix44][market_data][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, 'D');
+    auto raw = asm_.finish();
+    auto r = fix44::MarketDataIncrementalRefresh::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIX44 MarketDataRequestReject from_buffer missing MDReqID", "[messages][fix44][market_data][regression]") {
+    MessageAssembler asm_;
+    asm_.start(fix::FIX_4_4);
+    emit_header(asm_, fix44::MarketDataRequestReject::MSG_TYPE);
+    auto raw = asm_.finish();
+    auto r = fix44::MarketDataRequestReject::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::MissingRequiredField);
+}
+
+// ============================================================================
+// WS4: fixt11 session message branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("FIXT11 Heartbeat from_buffer wrong MsgType", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, 'D');
+    auto raw = asm_.finish();
+    auto r = fixt11::Heartbeat::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIXT11 Heartbeat from_buffer with TestReqID", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, fixt11::Heartbeat::MSG_TYPE);
+    asm_.field(tag::TestReqID::value, "HB1");
+    auto raw = asm_.finish();
+    auto r = fixt11::Heartbeat::from_buffer(raw);
+    REQUIRE(r.has_value());
+    REQUIRE(r->test_req_id == "HB1");
+}
+
+TEST_CASE("FIXT11 TestRequest from_buffer without TestReqID succeeds", "[messages][fixt11][session][regression]") {
+    // FIXT11 TestRequest treats TestReqID as optional (just populates empty string_view)
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, fixt11::TestRequest::MSG_TYPE);
+    auto raw = asm_.finish();
+    auto r = fixt11::TestRequest::from_buffer(raw);
+    REQUIRE(r.has_value());
+    REQUIRE(r->test_req_id.empty());
+}
+
+TEST_CASE("FIXT11 TestRequest from_buffer wrong MsgType", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, '0');  // Heartbeat, not TestRequest
+    auto raw = asm_.finish();
+    auto r = fixt11::TestRequest::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIXT11 ResendRequest from_buffer wrong MsgType", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, '0');
+    auto raw = asm_.finish();
+    auto r = fixt11::ResendRequest::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIXT11 SequenceReset from_buffer wrong MsgType", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, '0');
+    auto raw = asm_.finish();
+    auto r = fixt11::SequenceReset::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
+}
+
+TEST_CASE("FIXT11 Reject from_buffer wrong MsgType", "[messages][fixt11][session][regression]") {
+    MessageAssembler asm_;
+    asm_.start_fixt11();
+    emit_header(asm_, '0');
+    auto raw = asm_.finish();
+    auto r = fixt11::Reject::from_buffer(raw);
+    REQUIRE_FALSE(r.has_value());
+    REQUIRE(r.error().code == ParseErrorCode::InvalidMsgType);
 }

@@ -2389,3 +2389,71 @@ TEST_CASE("SchemaValidator validates required field presence", "[parser][constev
         REQUIRE_FALSE(SchemaValidator<TestSchema>::has_field(fields, 43));
     }
 }
+
+// ============================================================================
+// WS5: FieldView as_int / as_uint edge branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("FieldView as_int edge branches", "[parser][field_view][regression]") {
+    SECTION("empty value returns nullopt") {
+        FieldView fv{38, std::span<const char>{}};
+        REQUIRE_FALSE(fv.as_int().has_value());
+    }
+
+    SECTION("non-digit character returns nullopt") {
+        const char* s = "12X5";
+        FieldView fv{38, std::span<const char>{s, 4}};
+        REQUIRE_FALSE(fv.as_int().has_value());
+    }
+
+    SECTION("integer overflow guard returns nullopt") {
+        // 2^63 = 9223372036854775808, which is > INT64_MAX = 9223372036854775807
+        const char* s = "99999999999999999999";
+        FieldView fv{38, std::span<const char>{s, 20}};
+        REQUIRE_FALSE(fv.as_int().has_value());
+    }
+
+    SECTION("negative number parses correctly") {
+        const char* s = "-42";
+        FieldView fv{38, std::span<const char>{s, 3}};
+        auto v = fv.as_int();
+        REQUIRE(v.has_value());
+        REQUIRE(*v == -42);
+    }
+
+    SECTION("zero parses correctly") {
+        const char* s = "0";
+        FieldView fv{38, std::span<const char>{s, 1}};
+        auto v = fv.as_int();
+        REQUIRE(v.has_value());
+        REQUIRE(*v == 0);
+    }
+}
+
+TEST_CASE("FieldView as_uint edge branches", "[parser][field_view][regression]") {
+    SECTION("empty value returns nullopt") {
+        FieldView fv{38, std::span<const char>{}};
+        REQUIRE_FALSE(fv.as_uint().has_value());
+    }
+
+    SECTION("non-digit character returns nullopt") {
+        const char* s = "4Z2";
+        FieldView fv{38, std::span<const char>{s, 3}};
+        REQUIRE_FALSE(fv.as_uint().has_value());
+    }
+
+    SECTION("uint64 overflow guard returns nullopt") {
+        // 2^64 = 18446744073709551616
+        const char* s = "99999999999999999999";
+        FieldView fv{38, std::span<const char>{s, 20}};
+        REQUIRE_FALSE(fv.as_uint().has_value());
+    }
+
+    SECTION("valid uint parses correctly") {
+        const char* s = "12345";
+        FieldView fv{38, std::span<const char>{s, 5}};
+        auto v = fv.as_uint();
+        REQUIRE(v.has_value());
+        REQUIRE(*v == 12345u);
+    }
+}

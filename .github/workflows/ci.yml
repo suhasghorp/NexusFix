@@ -12,6 +12,10 @@ on:
 
 jobs:
   build:
+    # The nightly cron is workflow-wide; only fuzz-nightly should run on it.
+    # Gate every non-fuzz job on non-schedule so idle-branch nights don't burn
+    # runners (and can't spuriously trip the perf-regression gate).
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -231,6 +235,7 @@ jobs:
 
   # Static analysis: clang-tidy bounds-safety checks (TICKET_491)
   clang-tidy:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     name: Clang-Tidy
 
@@ -274,6 +279,7 @@ jobs:
 
   # Linux with full features (io_uring, SIMD, Abseil)
   linux-full:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     name: Linux Full Features
 
@@ -314,6 +320,7 @@ jobs:
   # Phase 2 fault-injection and Phase 4 boundary suites, never ran under a
   # sanitizer in CI). Debug build so assertion bodies are live; leak detection on.
   sanitizers:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     name: Sanitizers (ASan+UBSan)
 
@@ -358,6 +365,7 @@ jobs:
   # sanitized job by design: mimalloc's allocator collides with the ASan
   # interceptor, so its honest CI home is a plain build.
   mimalloc:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     name: mimalloc SessionHeap
 
@@ -401,15 +409,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # clang-19 (not 18): libstdc++'s <expected> is gated on
+      # __cpp_concepts >= 202002L, which clang-18 does not define (it reports
+      # 201907L), so the parser's std::expected use fails to compile with the
+      # libstdc++ the packaged libFuzzer runtime is built against. clang-19
+      # defines 202002L and keeps the libstdc++ ABI pairing intact.
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang-18 libstdc++-14-dev
+          sudo apt-get install -y ninja-build clang-19 libstdc++-14-dev
 
       - name: Configure
         env:
-          CC: clang-18
-          CXX: clang++-18
+          CC: clang-19
+          CXX: clang++-19
         run: |
           cmake -B build-fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -420,8 +433,7 @@ jobs:
             -DNFX_ENABLE_LOGGING=OFF \
             -DNFX_ENABLE_ABSEIL=OFF \
             -DNFX_ENABLE_SIMD=ON \
-            -DNFX_ENABLE_XSIMD=ON \
-            -DNFX_FUZZ_SMOKE_SECONDS=60
+            -DNFX_ENABLE_XSIMD=ON
 
       - name: Build harnesses
         run: cmake --build build-fuzz
@@ -432,9 +444,12 @@ jobs:
           for h in fuzz_structural_index fuzz_runtime_parser \
                    fuzz_session_input fuzz_serializer_roundtrip; do
             echo "== smoke: $h =="
+            # Scratch dir first (writable): new inputs land there, not in the
+            # checked-in seed corpus. The seed corpus is a read-only second arg.
+            mkdir -p "smoke-corpus/$h"
             ./build-fuzz/fuzz/$h \
               -max_total_time=60 -print_final_stats=1 \
-              "fuzz/corpus/$h"
+              "smoke-corpus/$h" "fuzz/corpus/$h"
           done
 
       - name: Upload crash inputs
@@ -460,27 +475,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # clang-19: same std::expected / __cpp_concepts constraint as fuzz-smoke.
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang-18 libstdc++-14-dev
+          sudo apt-get install -y ninja-build clang-19 libstdc++-14-dev
 
       - name: Hash seed corpus
         id: corpus
         run: echo "hash=${{ hashFiles('fuzz/corpus/**') }}" >> "$GITHUB_OUTPUT"
 
+      # The primary key must be unique per run, otherwise actions/cache sees an
+      # exact hit on the constant seed hash and skips the save at job end, so the
+      # corpus never grows past night 1. run_id makes every night save a fresh
+      # entry; the seed hash is a restore-key prefix so a corpus change starts a
+      # clean line and an unchanged corpus restores the most recent accumulation.
       - name: Restore accumulated corpus
         uses: actions/cache@v4
         with:
           path: fuzz-corpus-cache
-          key: fuzz-corpus-${{ steps.corpus.outputs.hash }}
+          key: fuzz-corpus-${{ steps.corpus.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
+            fuzz-corpus-${{ steps.corpus.outputs.hash }}-
             fuzz-corpus-
 
       - name: Configure
         env:
-          CC: clang-18
-          CXX: clang++-18
+          CC: clang-19
+          CXX: clang++-19
         run: |
           cmake -B build-fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \

@@ -38,10 +38,12 @@ foreach(harness ${NFX_FUZZ_HARNESSES})
 
     # Use the default stdlib (libstdc++). The clang libFuzzer runtime shipped on
     # Ubuntu is built against libstdc++ (__cxx11 ABI); linking it against libc++
-    # leaves its own std::string/iostream symbols unresolved. libstdc++ on this
-    # toolchain has std::expected, which is all the parser needs. The top-level
-    # -Werror plus header [[assume]] expressions with side effects trip
-    # -Wassume, so relax it for the instrumented fuzz build only.
+    # leaves its own std::string/iostream symbols unresolved. libstdc++'s
+    # <expected> (all the parser needs) is gated on __cpp_concepts >= 202002L, so
+    # this build requires clang >= 19 (clang-18 reports 201907L and has no
+    # std::expected under libstdc++). The top-level -Werror plus header [[assume]]
+    # expressions with side effects trip -Wassume, so relax it for the
+    # instrumented fuzz build only.
     # Later -stdlib wins under clang, overriding the top-level libc++ default.
     target_compile_options(${harness} PRIVATE
         -stdlib=libstdc++
@@ -73,11 +75,18 @@ set(NFX_FUZZ_SMOKE_SECONDS 60 CACHE STRING "Per-harness smoke run seconds")
 add_custom_target(fuzz_smoke
     COMMENT "Running ${NFX_FUZZ_SMOKE_SECONDS}s smoke over each fuzz harness")
 foreach(harness ${NFX_FUZZ_HARNESSES})
+    # Scratch corpus dir first (writable, in the build tree): libFuzzer writes
+    # newly discovered inputs to the FIRST corpus argument. Passing the checked-in
+    # seed corpus there dumps hundreds of hash-named files into the repo. Keep the
+    # seed corpus as a read-only second argument.
     add_custom_command(TARGET fuzz_smoke POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "== smoke: ${harness} =="
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/smoke-corpus/${harness}
         COMMAND $<TARGET_FILE:${harness}>
             -max_total_time=${NFX_FUZZ_SMOKE_SECONDS}
             -print_final_stats=1
+            ${CMAKE_CURRENT_BINARY_DIR}/smoke-corpus/${harness}
             ${CMAKE_CURRENT_SOURCE_DIR}/corpus/${harness}
         VERBATIM)
     add_dependencies(fuzz_smoke ${harness})

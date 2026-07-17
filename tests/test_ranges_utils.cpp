@@ -179,3 +179,129 @@ TEST_CASE("as_span / as_const_span", "[utils][ranges][regression]") {
     auto cs = as_const_span(cv);
     REQUIRE(cs.size() == 3);
 }
+
+// ============================================================================
+// WS3: FixFieldView tag-parse edge branches (TICKET_497_3)
+// ============================================================================
+// parse_next() has several early-exit guards: empty data, missing '=',
+// non-digit characters in the tag, integer overflow on the tag, and a field
+// with no trailing SOH (end-of-buffer). advance() also has a "no SOH found"
+// branch that empties data_.
+
+TEST_CASE("FixFieldView no equals sign returns tag 0", "[utils][ranges][fix_field][regression]") {
+    // Field without '=' - parse_next must return {0, {}}
+    std::string data = "NOTAG\x01";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.empty());
+}
+
+TEST_CASE("FixFieldView non-digit in tag returns 0", "[utils][ranges][fix_field][regression]") {
+    std::string data = "3X=D\x01";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.empty());
+}
+
+TEST_CASE("FixFieldView tag integer overflow clamps to 0", "[utils][ranges][fix_field][regression]") {
+    // Build a tag number larger than INT_MAX to trigger overflow guard
+    std::string data = "99999999999999999999=V\x01";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.empty());
+}
+
+TEST_CASE("FixFieldView field with no trailing SOH uses data end", "[utils][ranges][fix_field][regression]") {
+    // No SOH at end - soh_pos falls back to data_.size()
+    std::string data = "35=D";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.size() == 1);
+    REQUIRE(fields[0].first == 35);
+    REQUIRE(fields[0].second == "D");
+}
+
+TEST_CASE("FixFieldView advance with no SOH empties data", "[utils][ranges][fix_field][regression]") {
+    // First field has SOH so it is parsed; second field has no SOH but that
+    // means advance() empties data_ after the first ++ and the iterator ends.
+    std::string data = "8=FIX.4.4\x01""35=D";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.size() >= 1);
+    REQUIRE(fields[0].first == 8);
+}
+
+TEST_CASE("FixFieldView zero-digit tag (empty tag) returns 0", "[utils][ranges][fix_field][regression]") {
+    // '=' at position 0 - no digits before it, tag stays 0
+    std::string data = "=VALUE\x01";
+    std::vector<std::pair<int, std::string_view>> fields;
+    for (auto [tag, value] : fix_fields(data)) {
+        if (tag == 0) break;
+        fields.emplace_back(tag, value);
+    }
+    REQUIRE(fields.empty());
+}
+
+// ============================================================================
+// WS3: trim all-whitespace branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("trim all whitespace types", "[utils][ranges][regression]") {
+    REQUIRE(trim("\t") == "");
+    REQUIRE(trim("\r\n") == "");
+    REQUIRE(trim("  \t  ") == "");
+    REQUIRE(trim("a") == "a");
+    REQUIRE(trim(" a") == "a");
+    REQUIRE(trim("a ") == "a");
+}
+
+// ============================================================================
+// WS3: enumerate, to_vector, format utilities (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("enumerate produces index-value pairs", "[utils][ranges][regression]") {
+    std::vector<int> v = {10, 20, 30};
+    int sum_idx = 0;
+    for (auto [i, val] : enumerate(v)) {
+        sum_idx += static_cast<int>(i);
+        (void)val;
+    }
+    REQUIRE(sum_idx == 3);  // 0+1+2
+}
+
+TEST_CASE("to_vector converts range", "[utils][ranges][regression]") {
+    std::vector<int> src = {1, 2, 3, 4};
+    auto evens = src | std::views::filter([](int x){ return x % 2 == 0; });
+    auto result = to_vector(evens);
+    REQUIRE(result.size() == 2);
+    REQUIRE(result[0] == 2);
+    REQUIRE(result[1] == 4);
+}
+
+TEST_CASE("find_if returns correct iterator", "[utils][ranges][regression]") {
+    std::vector<int> v = {1, 3, 5, 6, 7};
+    auto it = find_if(v, [](int x){ return x % 2 == 0; });
+    REQUIRE(it != v.end());
+    REQUIRE(*it == 6);
+}
+
+TEST_CASE("find_if returns end when not found", "[utils][ranges][regression]") {
+    std::vector<int> v = {1, 3, 5};
+    auto it = find_if(v, [](int x){ return x % 2 == 0; });
+    REQUIRE(it == v.end());
+}

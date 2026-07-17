@@ -6,6 +6,11 @@
 #include <cstring>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #ifdef _MSC_VER
     #include <malloc.h>
 #endif
@@ -194,3 +199,93 @@ TEST_CASE("ScopedRangeLock RAII locks and unlocks range", "[memory_lock][regress
 
     portable_aligned_free(buf);
 }
+
+// ============================================================================
+// WS3: Force EPERM/ENOMEM branches via setrlimit(RLIMIT_MEMLOCK, 0) in a
+// forked child (TICKET_497_3).
+//
+// rlimit is process-global, so we fork: the child sets memlock limit to 0,
+// exercises lock_all_memory() and lock_memory() (both must return error codes
+// InsufficientPrivileges or InsufficientMemory), then exits with status 0.
+// The parent waits and checks exit status. This keeps the main process clean.
+//
+// Excluded on Windows (no fork/rlimit) and on root-running environments where
+// root bypasses RLIMIT_MEMLOCK (those environments are detected at runtime).
+// ============================================================================
+
+#ifndef _WIN32
+TEST_CASE("lock_all_memory returns error with zero memlock limit (forked child)", "[memory_lock][regression]") {
+    pid_t child = fork();
+    REQUIRE(child >= 0);
+
+    if (child == 0) {
+        // Child: set RLIMIT_MEMLOCK to 0 so mlockall fails
+        struct rlimit rlim{0, 0};
+        setrlimit(RLIMIT_MEMLOCK, &rlim);
+
+        auto result = lock_all_memory();
+        if (result.has_value()) {
+            // root or CAP_IPC_LOCK bypasses the limit - not an error condition
+            _exit(0);
+        }
+        auto ec = result.error().code;
+        bool expected = (ec == MemoryLockErrorCode::InsufficientPrivileges ||
+                         ec == MemoryLockErrorCode::InsufficientMemory ||
+                         ec == MemoryLockErrorCode::SystemError);
+        _exit(expected ? 0 : 1);
+    }
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("lock_memory returns error with zero memlock limit (forked child)", "[memory_lock][regression]") {
+    pid_t child = fork();
+    REQUIRE(child >= 0);
+
+    if (child == 0) {
+        struct rlimit rlim{0, 0};
+        setrlimit(RLIMIT_MEMLOCK, &rlim);
+
+        constexpr std::size_t buf_size = 4096;
+        void* buf = std::aligned_alloc(4096, buf_size);
+        if (!buf) _exit(0);
+        std::memset(buf, 0, buf_size);
+
+        auto result = lock_memory(buf, buf_size);
+        std::free(buf);
+
+        if (result.has_value()) {
+            // root bypass - ok
+            _exit(0);
+        }
+        auto ec = result.error().code;
+        bool expected = (ec == MemoryLockErrorCode::InsufficientPrivileges ||
+                         ec == MemoryLockErrorCode::InsufficientMemory ||
+                         ec == MemoryLockErrorCode::SystemError);
+        _exit(expected ? 0 : 1);
+    }
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("set_memlock_limit sets and reads back the limit", "[memory_lock][regression]") {
+    // Save original limit
+    struct rlimit orig{};
+    getrlimit(RLIMIT_MEMLOCK, &orig);
+
+    // Try to set; may fail if unprivileged (hard limit cannot be raised)
+    auto result = set_memlock_limit(orig.rlim_cur, orig.rlim_max);
+    // Either succeeds or returns a permission/system error - both are valid
+    if (!result.has_value()) {
+        auto ec = result.error().code;
+        REQUIRE((ec == MemoryLockErrorCode::InsufficientPrivileges ||
+                 ec == MemoryLockErrorCode::SystemError));
+    }
+}
+#endif

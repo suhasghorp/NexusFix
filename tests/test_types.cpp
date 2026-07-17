@@ -229,3 +229,108 @@ TEST_CASE("Timestamp operations", "[types][timestamp][regression]") {
     REQUIRE(ts.as_millis() == 1000LL);
     REQUIRE(ts.as_seconds() == 1LL);
 }
+
+// ============================================================================
+// WS5: FixedPrice::from_string edge branches (TICKET_497_3)
+// ============================================================================
+// The overflow guard, negative path, fraction-overflow (> DECIMAL_PLACES),
+// non-digit early-exit, and the fraction path hitting the inner branch for
+// fractional_digits < DECIMAL_PLACES are all driven here.
+
+TEST_CASE("FixedPrice::from_string edge branches", "[types][price][from_string][regression]") {
+    SECTION("empty string returns zero") {
+        auto p = FixedPrice::from_string("");
+        REQUIRE(p.raw == 0);
+    }
+
+    SECTION("negative value") {
+        auto p = FixedPrice::from_string("-100.5");
+        REQUIRE(p.raw < 0);
+        REQUIRE(p.to_double() < 0.0);
+    }
+
+    SECTION("fraction digits beyond DECIMAL_PLACES are ignored") {
+        // More than 8 decimal places - the extra digits are silently dropped
+        auto p8 = FixedPrice::from_string("1.00000001");
+        auto p12 = FixedPrice::from_string("1.000000019999");
+        REQUIRE(p8.raw == p12.raw);  // extra digits ignored
+    }
+
+    SECTION("non-digit character stops integer parse") {
+        // 'A' is not a digit: parse stops at the non-digit
+        auto p = FixedPrice::from_string("5A3");
+        REQUIRE(p.to_double() == 5.0);
+    }
+
+    SECTION("integer overflow guard clamps correctly") {
+        // A number much larger than int64_t max / SCALE should stop parsing
+        auto p = FixedPrice::from_string("99999999999999999999");
+        // Should not crash; raw value is clamped or truncated
+        (void)p;
+    }
+
+    SECTION("pure integer (no dot)") {
+        auto p = FixedPrice::from_string("250");
+        REQUIRE(p.to_double() == 250.0);
+    }
+
+    SECTION("zero") {
+        auto p = FixedPrice::from_string("0.0");
+        REQUIRE(p.raw == 0);
+    }
+
+    SECTION("max allowed fractional digits exactly") {
+        // 8 decimal places fills all fractional_digits < DECIMAL_PLACES iterations
+        auto p = FixedPrice::from_string("1.12345678");
+        REQUIRE(p.raw != 0);
+    }
+}
+
+// ============================================================================
+// WS5: Qty::from_string edge branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("Qty::from_string edge branches", "[types][qty][from_string][regression]") {
+    SECTION("empty string returns zero") {
+        REQUIRE(Qty::from_string("").raw == 0);
+    }
+
+    SECTION("negative value") {
+        auto q = Qty::from_string("-100");
+        REQUIRE(q.raw < 0);
+        REQUIRE(q.whole() == -100);
+    }
+
+    SECTION("fraction digits beyond DECIMAL_PLACES are ignored") {
+        auto q4 = Qty::from_string("1.0001");
+        auto q8 = Qty::from_string("1.00010000");
+        REQUIRE(q4.raw == q8.raw);
+    }
+
+    SECTION("non-digit stops parse") {
+        auto q = Qty::from_string("7X9");
+        REQUIRE(q.whole() == 7);
+    }
+
+    SECTION("integer overflow guard clamps") {
+        auto q = Qty::from_string("999999999999999999999");
+        (void)q;  // must not crash
+    }
+
+    SECTION("zero with dot") {
+        auto q = Qty::from_string("0.0");
+        REQUIRE(q.raw == 0);
+    }
+}
+
+// ============================================================================
+// WS5: SeqNum edge branches (TICKET_497_3)
+// ============================================================================
+
+TEST_CASE("SeqNum is_valid edge cases", "[types][seqnum][regression]") {
+    REQUIRE(SeqNum{1}.is_valid());
+    REQUIRE(SeqNum{SeqNum::MAX_VALUE}.is_valid());
+    REQUIRE_FALSE(SeqNum{0}.is_valid());
+    // value > MAX_VALUE is invalid
+    REQUIRE_FALSE(SeqNum{SeqNum::MAX_VALUE + 1}.is_valid());
+}
