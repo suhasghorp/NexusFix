@@ -21,6 +21,16 @@ endif()
 set(NFX_FUZZ_SANITIZERS "fuzzer,address,undefined"
     CACHE STRING "Sanitizer set for fuzz harnesses")
 
+# The top-level CMakeLists sets, for Clang/Linux, directory-scope
+# `add_link_options(-stdlib=libc++ -lc++abi)` and `add_compile_options(-stdlib=libc++)`.
+# The fuzz harnesses deliberately use libstdc++ (the packaged libFuzzer runtime is
+# built against the libstdc++ ABI). Appending `-stdlib=libstdc++` per target wins for
+# stdlib selection, but the inherited `-lc++abi` token stays on the link line and
+# breaks the link on any host without libc++abi installed (e.g. the CI runner:
+# "cannot find -lc++abi"). Clear the inherited directory-scope options here so the
+# harnesses carry only their own libstdc++ flags. Must run before add_executable.
+set_directory_properties(PROPERTIES COMPILE_OPTIONS "" LINK_OPTIONS "")
+
 set(NFX_FUZZ_HARNESSES
     fuzz_structural_index
     fuzz_runtime_parser
